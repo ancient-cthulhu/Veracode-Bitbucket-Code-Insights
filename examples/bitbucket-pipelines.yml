@@ -1,0 +1,73 @@
+# =============================================================================
+# Veracode SAST + Bitbucket Code Insights (Bitbucket Pipelines, Bitbucket Cloud)
+#
+# Rename to bitbucket-pipelines.yml, or copy the steps into your own file.
+#
+#   Push to main         -> Policy Scan  -> report on the commit
+#   Push to any branch   -> Sandbox scan (sandbox = branch name)
+#                           -> report on the commit, shown inline on its PR
+#
+# Repository variables (Repository settings > Pipelines > Repository variables):
+#   VERACODE_API_ID     Veracode API ID   (Secured)
+#   VERACODE_API_KEY    Veracode API key  (Secured)
+#   VERACODE_APP_NAME   Optional. Default: <workspace>/<repo>
+#
+# No Bitbucket token is needed: the report step uses the Pipelines proxy.
+# If your default branch is not "main", change "main" in both places below.
+# =============================================================================
+
+image: maven:3.9-eclipse-temurin-17
+
+definitions:
+  steps:
+    # Package the application with the Veracode CLI autopackager.
+    - step: &package
+        name: Package for Veracode
+        script:
+          - mkdir -p /opt/veracode-cli && cd /opt/veracode-cli
+          - curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+          - cd "$BITBUCKET_CLONE_DIR"
+          - /opt/veracode-cli/veracode package --source . --output verascan --trust
+        artifacts:
+          - verascan/**
+
+    # Upload and start the scan. The scan version starts with the commit SHA:
+    # the report step uses it to post results on the right commit.
+    - step: &scan
+        name: Veracode scan (policy or sandbox)
+        script:
+          - apt-get update -qq && apt-get install -y -qq unzip >/dev/null
+          - BASE="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java"
+          - WRAPPER=$(curl -fsS "$BASE/maven-metadata.xml" | grep -oPm1 "(?<=<latest>)[^<]+")
+          - curl -fsSL "$BASE/$WRAPPER/vosp-api-wrappers-java-$WRAPPER-dist.zip" -o dist.zip
+          - unzip -oq dist.zip -d .veracode && cp "$(find .veracode -name 'VeracodeJavaAPI*.jar' | head -n1)" VeracodeJavaAPI.jar
+          - |
+            set -- -appname "${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}" \
+                   -version "$(echo "$BITBUCKET_COMMIT" | cut -c1-12)-${BITBUCKET_BUILD_NUMBER}" \
+                   -filepath verascan -createprofile false -deleteincompletescan 2
+            if [ "$BITBUCKET_BRANCH" != "main" ]; then
+              set -- "$@" -sandboxname "$BITBUCKET_BRANCH" -createsandbox true
+            fi
+            java -jar VeracodeJavaAPI.jar -vid "$VERACODE_API_ID" -vkey "$VERACODE_API_KEY" \
+                 -action UploadAndScan "$@"
+
+    # Wait for the results and post them as a Code Insights report.
+    - step: &code-insights
+        name: Veracode Code Insights
+        image: python:3.12
+        script:
+          - pip install -q requests veracode-api-signing
+          # Pin to a tag or commit instead of main for stable builds.
+          - curl -fsSLO https://raw.githubusercontent.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights/main/veracode_bb_insights.py
+          - python veracode_bb_insights.py --default-branch main --wait 60
+
+pipelines:
+  branches:
+    main:
+      - step: *package
+      - step: *scan
+      - step: *code-insights
+  default:            # every other branch (tags excluded)
+    - step: *package
+    - step: *scan
+    - step: *code-insights
