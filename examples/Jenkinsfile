@@ -1,0 +1,78 @@
+// Veracode SAST + Bitbucket Code Insights (Jenkins multibranch pipeline)
+// Works with Bitbucket Data Center and Bitbucket Cloud.
+//
+//   Default branch   -> Policy Scan
+//   Other branches   -> Sandbox scan (sandbox = branch name), also for PR builds
+//
+// Needs: the Veracode Jenkins Plugin (Veracode Scan), python3 + git on the agent.
+// Credentials (Manage Jenkins > Credentials):
+//   <veracode-api>     Username/password: Veracode API ID / API key
+//   <bitbucket-token>  Secret text: Bitbucket HTTP access token (Data Center)
+//                      or repository access token (Cloud), repository write
+// Data Center only: set BITBUCKET_URL below. Leave it empty for Cloud.
+// PR builds: prefer the "current pull request revision" checkout strategy.
+
+pipeline {
+    agent any
+    environment {
+        BITBUCKET_URL = 'https://bitbucket.example.com'   // '' for Bitbucket Cloud
+        DEFAULT_BRANCH = 'main'
+    }
+    stages {
+        stage('Build') {
+            steps {
+                sh '<your build, producing the artifacts to scan>'
+            }
+        }
+        stage('Veracode scan') {
+            steps {
+                script {
+                    def branch = env.CHANGE_BRANCH ?: env.BRANCH_NAME
+                    def isDefault = branch == env.DEFAULT_BRANCH
+                    // The scan version starts with the commit SHA: the report step
+                    // uses it to post results on the right commit. A "merge with
+                    // target" PR build uses a local merge commit; its first parent
+                    // is the PR head commit (the report step does the same).
+                    def sha = sh(returnStdout: true, script: '''
+                        if [ -n "$CHANGE_ID" ] && [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -gt 2 ]; then
+                            git rev-parse HEAD^1
+                        else
+                            git rev-parse HEAD
+                        fi
+                    ''').trim()
+                    def scanName = "${sha.substring(0, 12)}-${env.BUILD_NUMBER}"
+                    withCredentials([usernamePassword(credentialsId: '<veracode-api>',
+                                                      usernameVariable: 'VERACODE_API_ID',
+                                                      passwordVariable: 'VERACODE_API_KEY')]) {
+                        veracode applicationName: '<Veracode application profile name>',
+                                 createProfile: false,
+                                 sandboxName: isDefault ? '' : branch,
+                                 createSandbox: !isDefault,
+                                 scanName: scanName,
+                                 uploadIncludesPattern: '<artifacts to upload, e.g. target/*.war>',
+                                 waitForScan: false,
+                                 deleteIncompleteScanLevel: '2',
+                                 canFailJob: true,
+                                 vid: VERACODE_API_ID,
+                                 vkey: VERACODE_API_KEY
+                    }
+                }
+            }
+        }
+        stage('Veracode Code Insights') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: '<veracode-api>',
+                                                  usernameVariable: 'VERACODE_API_ID',
+                                                  passwordVariable: 'VERACODE_API_KEY'),
+                                 string(credentialsId: '<bitbucket-token>', variable: 'BITBUCKET_TOKEN')]) {
+                    sh '''
+                        python3 -m venv .vc-venv
+                        .vc-venv/bin/pip install -q requests veracode-api-signing
+                        curl -fsSLO https://raw.githubusercontent.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights/main/veracode_bb_insights.py
+                        .vc-venv/bin/python veracode_bb_insights.py --default-branch "$DEFAULT_BRANCH" --wait 60
+                    '''
+                }
+            }
+        }
+    }
+}
