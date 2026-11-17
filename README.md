@@ -73,7 +73,7 @@ Exit codes:
 
 | Code | Meaning |
 |---|---|
-| `0` | Report posted, or nothing to post (reason printed): a newer commit's scan replaced this one, tag build, or no usable scan without `--fail-build` |
+| `0` | Report posted, or nothing to post (reason printed): the latest scan is for another commit, tag build, or no usable scan without `--fail-build` |
 | `1` | Configuration, argument or API error (`ERROR: ...`) |
 | `2` | Report FAILED, with `--fail-build` |
 | `3` | With `--fail-build`: the scan failed or timed out, its sandbox is missing or ambiguous, or it is not named after a commit |
@@ -98,7 +98,7 @@ Drop `--dry-run` and set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data Center)
 | `Nothing posted: No sandbox named '...'` | Scan step used a different sandbox name | Use the branch name, or pass `--sandbox-name` |
 | `Nothing posted: Several sandboxes match '...'` | Sandbox names differ only by case | Rename or delete one, or pass `--sandbox-name` |
 | `scan '...' did not complete: Pre-Scan Failed` (or `No Modules`) | The scan itself failed | Fix packaging or module selection in Veracode, then rerun |
-| `stopped waiting after N min` | Scan still running | Raise `--wait`, or rerun the report step later with `--commit` and `--branch` |
+| `stopped waiting after N min` | Scan still running | Raise `--wait`, or post later: Pipelines **Run pipeline > custom: veracode-report** on the commit; Jenkins rerun the build or run the script with `--commit` and `--branch` |
 | `waiting for the policy evaluation` | Results are ready, policy is still being evaluated | Usually a minute; keep waiting |
 | `ERROR: getbuildinfo.do: Access denied` (or another message) | The API account cannot read this profile or sandbox | Give the account the Results API role and access to the profile's team |
 | `ERROR: no application profile named ...` | Profile name differs from the repo name | Set `VERACODE_APP_NAME` |
@@ -115,7 +115,10 @@ Drop `--dry-run` and set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data Center)
 | `ERROR: Bitbucket ... HTTP 401/403` | Token scope, or (Data Center) another user created the report | Use a repository-read token, and the same token every time |
 | Report shows, but no inline annotations | Bitbucket shows annotations only on lines changed in the PR | Open the report to see all findings |
 | Findings listed as "not matched to a file" | Path is not in the repo (generated code, other module), matches two files, or git is missing | See "Veracode location" in the annotation; check `--repo-dir` |
-| `sha256sum: WARNING: 1 computed checksum did NOT match` | `VBI_REF` and `VBI_SHA256` are from different releases | Use the pair from the release notes |
+| `curl: (22) ... 404` in the report step | `VBI_REF` is not a published tag or commit | Use a release tag from the repository's releases |
+| `sha256sum: WARNING: 1 computed checksum did NOT match` | A pinned version and its checksum don't belong together (`VBI_REF`/`VBI_SHA256`, `CLI_VERSION`/`CLI_SHA256`, `WRAPPER`/`WRAPPER_SHA256`) | Use the pair from the release notes, or the `sha256sum` of the downloaded file |
+| Scan step fails on the default branch while a policy scan is running | `deleteincompletescan 1` never deletes a running policy scan, so a new one can't start | Expected on busy branches; rerun the step when the running scan finishes, or let the next merge scan the newer code |
+| Scan step can't create a sandbox | The application reached its sandbox limit | Delete sandboxes of merged branches (Veracode UI or Sandbox API) |
 | HTTP 401 from Veracode | Wrong region or credentials | The region comes from the API ID; set `VERACODE_API_BASE` to override |
 
 ## Limits
@@ -124,6 +127,8 @@ Drop `--dry-run` and set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data Center)
 - SAST only (SCA findings have no line number).
 - Sandboxes of merged branches are not deleted; clean them up to stay under the sandbox limit.
 - Long scans hold the CI runner while `--wait` runs.
+- One report per commit: the last run wins, so a branch pushed with no new commits replaces the default branch's report on that commit.
+- With a token, the report step reads the repository once before waiting, so a bad token or repository fails early. In Pipelines (proxy) that check happens only when results are posted.
 
 ## Files
 
