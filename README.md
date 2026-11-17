@@ -34,14 +34,14 @@ Findings are sorted NEW first, then by severity. Closed findings and approved mi
 ## Setup
 
 1. Make the scan step follow the naming above (both examples do).
-2. Add the report step after the scan step. Pin the script to a release tag and check its SHA-256 (listed in the release notes), as the examples do, or copy the file into your repository. macOS agents: `shasum -a 256 -c` instead of `sha256sum -c`.
+2. Add the report step after the scan step. Pin the script to a release tag and check its SHA-256 (listed in the release notes), as the examples do, or copy the file into your repository. The examples pin the Veracode CLI and API wrapper the same way; to upgrade one, change its version and checksum together. macOS agents: `shasum -a 256 -c` instead of `sha256sum -c`.
 3. Add the credentials:
 
 | Name | Where | Needed for |
 |---|---|---|
 | `VERACODE_API_ID`, `VERACODE_API_KEY` | Pipelines secured variables / Jenkins credentials | Always. API service account: **Upload and Scan API** (scan step) + **Results API** (report step). The report step alone only needs Results API |
 | `BITBUCKET_TOKEN` | Jenkins credentials | Jenkins (Cloud or Data Center). Not needed in Bitbucket Pipelines |
-| `BITBUCKET_URL` | Environment | Data Center only, e.g. `https://bitbucket.example.com` |
+| `BITBUCKET_URL` | Environment | Data Center only, e.g. `https://bitbucket.example.com` (plain `http://` works but prints a warning: the token is sent unencrypted) |
 
 Bitbucket tokens need **repository read**: a Cloud repository access token, or a Data Center HTTP access token. On Data Center only the user that created a report can replace it, so always use the same token.
 
@@ -53,7 +53,7 @@ Other environment variables:
 | `BITBUCKET_USER` | Cloud: account email when `BITBUCKET_TOKEN` is an Atlassian API token (Basic auth) |
 | `BITBUCKET_DEFAULT_BRANCH` | Same as `--default-branch` |
 | `BITBUCKET_PROXY` | Pipelines proxy (default `http://localhost:29418`; use `http://host.docker.internal:29418` inside a pipe) |
-| `VERACODE_API_BASE` | Veracode API host. Default: chosen from the API ID region (US, EU, FedRAMP) |
+| `VERACODE_API_BASE` | Veracode API host, `https://` only. Default: chosen from the API ID region (US, EU, FedRAMP) |
 
 The older names `VERACODE_API_KEY_ID` / `VERACODE_API_KEY_SECRET` and `~/.veracode/credentials` also work.
 
@@ -73,7 +73,7 @@ Exit codes:
 
 | Code | Meaning |
 |---|---|
-| `0` | Report posted, or nothing to post (reason printed): a newer commit's scan replaced this one, tag build, or no usable scan without `--fail-build` |
+| `0` | Report posted, or nothing to post (reason printed): the latest scan is for another commit, tag build, or no usable scan without `--fail-build` |
 | `1` | Configuration, argument or API error (`ERROR: ...`) |
 | `2` | Report FAILED, with `--fail-build` |
 | `3` | With `--fail-build`: the scan failed or timed out, its sandbox is missing or ambiguous, or it is not named after a commit |
@@ -81,7 +81,7 @@ Exit codes:
 ## Run locally
 
 ```bash
-pip install -r requirements.txt
+pip install --no-deps -r requirements.txt   # skips httpie, which veracode-api-signing declares but this tool never uses
 export VERACODE_API_ID=... VERACODE_API_KEY=...
 python veracode_bb_insights.py --commit <sha> --branch feature/PAY-12 --repo acme/payments-api \
   --default-branch main --dry-run
@@ -98,7 +98,7 @@ Drop `--dry-run` and set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data Center)
 | `Nothing posted: No sandbox named '...'` | Scan step used a different sandbox name | Use the branch name, or pass `--sandbox-name` |
 | `Nothing posted: Several sandboxes match '...'` | Sandbox names differ only by case | Rename or delete one, or pass `--sandbox-name` |
 | `scan '...' did not complete: Pre-Scan Failed` (or `No Modules`) | The scan itself failed | Fix packaging or module selection in Veracode, then rerun |
-| `stopped waiting after N min` | Scan still running | Raise `--wait`, or rerun the report step later with `--commit` and `--branch` |
+| `stopped waiting after N min` | Scan still running | Raise `--wait`, or post later: Pipelines **Run pipeline > custom: veracode-report** on the commit; Jenkins rerun the build or run the script with `--commit` and `--branch` |
 | `waiting for the policy evaluation` | Results are ready, policy is still being evaluated | Usually a minute; keep waiting |
 | `ERROR: getbuildinfo.do: Access denied` (or another message) | The API account cannot read this profile or sandbox | Give the account the Results API role and access to the profile's team |
 | `ERROR: no application profile named ...` | Profile name differs from the repo name | Set `VERACODE_APP_NAME` |
@@ -107,13 +107,18 @@ Drop `--dry-run` and set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data Center)
 | `ERROR: set BITBUCKET_TOKEN` | Running outside Pipelines without a token | Add the token credential |
 | `ERROR: could not read the default branch` | Token cannot read the repository, or the proxy refuses the lookup | Pass `--default-branch` |
 | `ERROR: repository ... not found on ...` | Wrong Data Center project key or slug, or the token lacks access | Check `GIT_URL` / `--repo`; personal repos use `~user` |
+| Jenkins fork PR report goes to the fork, or `repository ... not found` | The fork checkout's `GIT_URL` points at the fork | Set `VBI_REPO` in the Jenkinsfile (passes `--repo`) |
+| `WARNING: BITBUCKET_URL uses http://` | Data Center URL is not https | Use the server's https URL |
 | `ERROR: detached HEAD` / `could not detect ...` | No branch or repo in the CI variables | Pass `--branch` / `--repo` |
 | `ERROR: Bitbucket Data Center needs the full 40-character commit SHA` | Short `--commit` that the checkout cannot expand | Pass the full SHA |
 | `ERROR: Bitbucket add annotations failed: HTTP 400` (Data Center) | The instance allows fewer than 1000 annotations per report | Raise the server limit; the report says the annotations are incomplete |
 | `ERROR: Bitbucket ... HTTP 401/403` | Token scope, or (Data Center) another user created the report | Use a repository-read token, and the same token every time |
 | Report shows, but no inline annotations | Bitbucket shows annotations only on lines changed in the PR | Open the report to see all findings |
 | Findings listed as "not matched to a file" | Path is not in the repo (generated code, other module), matches two files, or git is missing | See "Veracode location" in the annotation; check `--repo-dir` |
-| `sha256sum: WARNING: 1 computed checksum did NOT match` | `VBI_REF` and `VBI_SHA256` are from different releases | Use the pair from the release notes |
+| `curl: (22) ... 404` in the report step | `VBI_REF` is not a published tag or commit | Use a release tag from the repository's releases |
+| `sha256sum: WARNING: 1 computed checksum did NOT match` | A pinned version and its checksum don't belong together (`VBI_REF`/`VBI_SHA256`, `CLI_VERSION`/`CLI_SHA256`, `WRAPPER`/`WRAPPER_SHA256`) | Use the pair from the release notes, or the `sha256sum` of the downloaded file |
+| Scan step fails on the default branch while a policy scan is running | `deleteincompletescan 1` never deletes a running policy scan, so a new one can't start | Expected on busy branches; rerun the step when the running scan finishes, or let the next merge scan the newer code |
+| Scan step can't create a sandbox | The application reached its sandbox limit | Delete sandboxes of merged branches (Veracode UI or Sandbox API) |
 | HTTP 401 from Veracode | Wrong region or credentials | The region comes from the API ID; set `VERACODE_API_BASE` to override |
 
 ## Limits
@@ -122,11 +127,13 @@ Drop `--dry-run` and set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data Center)
 - SAST only (SCA findings have no line number).
 - Sandboxes of merged branches are not deleted; clean them up to stay under the sandbox limit.
 - Long scans hold the CI runner while `--wait` runs.
+- One report per commit: the last run wins, so a branch pushed with no new commits replaces the default branch's report on that commit.
+- With a token, the report step reads the repository once before waiting, so a bad token or repository fails early. In Pipelines (proxy) that check happens only when results are posted.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `veracode_bb_insights.py` | The report step |
-| `requirements.txt` | `requests` and its TLS dependencies, `veracode-api-signing`, with safe minimum versions |
+| `requirements.txt` | Every package the script imports, with safe minimum versions and major-version caps; install with `--no-deps` |
 | `examples/` | Bitbucket Pipelines and Jenkins examples |

@@ -16,6 +16,16 @@
 # No Bitbucket token is needed: the report step uses the Pipelines proxy.
 # If your default branch is not "main", change "main" in all three places below
 # (the scan step "if", --default-branch, and the "branches:" key).
+#
+# The report script, the Veracode CLI and the API wrapper are pinned to a version and
+# checked against their SHA-256, because secured variables are available to every step.
+# Python packages are capped at the next major version (not hash-pinned). To upgrade a tool, change the
+# version and its checksum together (sha256sum of the downloaded file):
+#   latest CLI:     curl -fsS https://tools.veracode.com/veracode-cli/LATEST_VERSION
+#   latest wrapper: <release> in https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml
+#
+# After "stopped waiting" (long scan), post the results later with
+# Run pipeline > custom: veracode-report on the same commit.
 # =============================================================================
 
 image: maven:3.9-eclipse-temurin-17
@@ -26,10 +36,12 @@ definitions:
     - step: &package
         name: Package for Veracode
         script:
-          - mkdir -p /opt/veracode-cli && cd /opt/veracode-cli
-          - curl -fsS https://tools.veracode.com/veracode-cli/install | sh
-          - cd "$BITBUCKET_CLONE_DIR"
-          - /opt/veracode-cli/veracode package --source . --output verascan --trust
+          - CLI_VERSION=2.55.0
+          - CLI_SHA256=44fde332acc9401f51486404dba3289cff894cf32aafda612e0a8f1cbc1b2140
+          - curl -fsSLo /tmp/cli.tgz "https://tools.veracode.com/veracode-cli/veracode-cli_${CLI_VERSION}_linux_x86.tar.gz"
+          - echo "$CLI_SHA256  /tmp/cli.tgz" | sha256sum -c -
+          - tar xzf /tmp/cli.tgz -C /tmp
+          - /tmp/veracode-cli_${CLI_VERSION}_linux_x86/veracode package --source . --output verascan --trust
         artifacts:
           - verascan/**
 
@@ -38,37 +50,39 @@ definitions:
     - step: &scan
         name: Veracode scan (policy or sandbox)
         script:
-          - apt-get update -qq && apt-get install -y -qq unzip >/dev/null
-          - BASE="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java"
-          - WRAPPER=$(curl -fsS "$BASE/maven-metadata.xml" | sed -n 's:.*<latest>\(.*\)</latest>.*:\1:p')
-          - curl -fsSL "$BASE/$WRAPPER/vosp-api-wrappers-java-$WRAPPER-dist.zip" -o dist.zip
-          - unzip -oq dist.zip -d .veracode && cp "$(find .veracode -name 'VeracodeJavaAPI*.jar' | head -n1)" VeracodeJavaAPI.jar
+          - WRAPPER=26.10.20.1
+          - WRAPPER_SHA256=415764c77de672bcf2acaf61cdd9ab466f4cb45766b1650ab7b4673166736ad5
+          - curl -fsSLo /tmp/VeracodeJavaAPI.jar "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/$WRAPPER/vosp-api-wrappers-java-$WRAPPER.jar"
+          - echo "$WRAPPER_SHA256  /tmp/VeracodeJavaAPI.jar" | sha256sum -c -
           - |
             set -- -appname "${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}" \
                    -version "$(echo "$BITBUCKET_COMMIT" | cut -c1-12)-${BITBUCKET_BUILD_NUMBER}" \
                    -filepath verascan -createprofile false
             if [ "$BITBUCKET_BRANCH" = "main" ]; then
-              set -- "$@" -deleteincompletescan 1        # never delete a policy scan still running
+              # Never delete a policy scan still running. A merge while the previous policy
+              # scan runs fails this step; rerun it when that scan finishes.
+              set -- "$@" -deleteincompletescan 1
             else
               set -- "$@" -sandboxname "$BITBUCKET_BRANCH" -createsandbox true -deleteincompletescan 2
             fi
-            java -jar VeracodeJavaAPI.jar -vid "$VERACODE_API_ID" -vkey "$VERACODE_API_KEY" \
+            java -jar /tmp/VeracodeJavaAPI.jar -vid "$VERACODE_API_ID" -vkey "$VERACODE_API_KEY" \
                  -action UploadAndScan "$@"
 
     # Wait for the results and post them as a Code Insights report.
     # The script is pinned to a release and checked against its SHA-256, and it runs
     # from /tmp with "python -I" so files in the checkout cannot replace its modules.
+    # No pip cache: caches are shared by all branches, so one branch could poison it.
     - step: &code-insights
         name: Veracode Code Insights
         image: python:3.12
-        caches:
-          - pip
+        artifacts:
+          download: false             # only the git checkout is needed, not verascan/
         script:
           - VBI_REF=v1.0.0
-          - VBI_SHA256=46587fcde05685622fb6a354f61e9e4d9a1e9d32c5e12c5814e3cc1b47d84b0c
+          - VBI_SHA256=d864a4ab0ec82d6277d04ec01094c29e800a7eb958309e659733a03377dbeffd
           - curl -fsSLo /tmp/vbi.py "https://raw.githubusercontent.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights/$VBI_REF/veracode_bb_insights.py"
           - echo "$VBI_SHA256  /tmp/vbi.py" | sha256sum -c -
-          - pip install -q "requests>=2.33" "urllib3>=2.8" && pip install -q --no-deps "veracode-api-signing>=24.0"
+          - pip install -q "requests>=2.33,<3" "urllib3>=2.8,<3" && pip install -q --no-deps "veracode-api-signing>=24.0,<27"
           - python -I /tmp/vbi.py --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch main --wait 60
 
 pipelines:
@@ -81,3 +95,6 @@ pipelines:
     - step: *package
     - step: *scan
     - step: *code-insights
+  custom:
+    veracode-report:  # Run pipeline on a commit to post its results after "stopped waiting"
+      - step: *code-insights
