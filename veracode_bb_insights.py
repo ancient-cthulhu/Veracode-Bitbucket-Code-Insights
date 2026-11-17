@@ -114,17 +114,37 @@ def check(response, what):
 
 def retry_after(response, default):
     value = response.headers.get("Retry-After", "")
-    return min(int(value), 120) if value.isdigit() else default
+    return min(int(value), 120) if value.isascii() and value.isdigit() else default
+
+
+def require_https(url, name, *, strict=True):
+    """Credentials should only travel over https. Plain http is accepted for this machine
+    (tests) and, with a warning, for internal Bitbucket Data Center servers (strict=False)."""
+    parsed = urlparse(url)
+    local = parsed.hostname in ("localhost", "127.0.0.1", "::1")
+    if parsed.scheme == "https" or (parsed.scheme == "http" and local):
+        return url.rstrip("/")
+    if parsed.scheme == "http" and not strict:
+        log(f"WARNING: {name} uses http://; the token is sent unencrypted. Use https:// if the server supports it.")
+        return url.rstrip("/")
+    raise SystemExit(f"ERROR: {name} must be an https:// URL.")
 
 
 # =============================================================================
 # 1. CI CONTEXT: commit, branch, repository
 # =============================================================================
+# Repository config is untrusted (earlier build steps can edit .git/config): never let it
+# run a program (fsmonitor hook) or prompt, and don't take locks or rewrite the index.
+GIT_SAFE_CONFIG = ("-c", "core.quotepath=off", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false")
+GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+
+
 def git(args, cwd=".", timeout=60):
     """Run git; return its output, or None when git fails or is missing."""
     try:
-        out = subprocess.run(["git", "-c", "core.quotepath=off", *args], cwd=cwd, capture_output=True,
-                             encoding="utf-8", errors="replace", timeout=timeout, check=False)
+        out = subprocess.run(["git", *GIT_SAFE_CONFIG, *args], cwd=cwd, capture_output=True,
+                             encoding="utf-8", errors="replace", timeout=timeout, check=False,
+                             env={**os.environ, **GIT_ENV})
     except (OSError, subprocess.TimeoutExpired):
         return None
     return out.stdout.strip() if out.returncode == 0 else None
@@ -179,8 +199,11 @@ def ci_commit(args, env):
         if env.get("CHANGE_ID") and not env.get("BITBUCKET_COMMIT"):
             commit = jenkins_merge_parent(args.repo_dir) or commit
     commit = commit.lower()
-    if re.fullmatch(r"[0-9a-f]{7,39}", commit):      # expand a short SHA when the checkout has it
-        commit = (git(["rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"], args.repo_dir) or commit).lower()
+    if re.fullmatch(r"[0-9a-f]{7,39}", commit):      # expand a short SHA when it names exactly one commit
+        matches = (git(["rev-parse", f"--disambiguate={commit}"], args.repo_dir) or "").split()
+        commits = [m for m in matches if git(["cat-file", "-t", m], args.repo_dir) == "commit"]
+        if len(commits) == 1:
+            commit = commits[0].lower()
     return commit
 
 
@@ -208,7 +231,8 @@ def detect_context(args, env=None):
     Precedence: COMMIT_VARS, BRANCH_VARS (then GIT_BRANCH / git), BITBUCKET_WORKSPACE +
     BITBUCKET_REPO_SLUG (then GIT_URL / origin)."""
     env = os.environ if env is None else env
-    server_url = (args.server_url or env.get("BITBUCKET_URL", "")).rstrip("/")
+    server_url = args.server_url or env.get("BITBUCKET_URL", "")
+    server_url = require_https(server_url, "BITBUCKET_URL", strict=False) if server_url else ""
     commit, branch = ci_commit(args, env), ci_branch(args, env)
     if branch in ("", "HEAD") and (env.get("BITBUCKET_TAG") or env.get("TAG_NAME")):
         raise Skip("tag build, no branch to report on")
@@ -256,7 +280,7 @@ class Veracode:
         api_id, secret, region = veracode_credentials()
         self.rest, self.platform = PLATFORM_HOSTS[region]
         if os.getenv("VERACODE_API_BASE"):
-            self.rest = os.environ["VERACODE_API_BASE"].rstrip("/")
+            self.rest = require_https(os.environ["VERACODE_API_BASE"], "VERACODE_API_BASE")
             self.platform = self.rest.replace("://api.", "://analysiscenter.")
         self.auth = RequestsAuthPluginVeracodeHMAC(api_id, secret)
         self.session = requests.Session()

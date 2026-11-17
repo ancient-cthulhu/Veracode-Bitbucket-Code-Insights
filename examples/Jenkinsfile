@@ -23,8 +23,9 @@ pipeline {
         BITBUCKET_URL = ''              // Data Center: 'https://bitbucket.example.com'; '' = Bitbucket Cloud
         DEFAULT_BRANCH = 'main'
         VERACODE_APP_NAME = '<Veracode application profile name>'
+        VBI_REPO = ''                   // '<workspace or PROJECT>/<repo>' when fork PRs are built: their GIT_URL can point at the fork
         VBI_REF = 'v1.0.0'              // release tag (or a full commit SHA) of the report script
-        VBI_SHA256 = '46587fcde05685622fb6a354f61e9e4d9a1e9d32c5e12c5814e3cc1b47d84b0c'
+        VBI_SHA256 = '8902b92bfdb4c8ad72f1ef22f2799b20d094d47b734ea477cbacb77dac48c1af'
     }
     stages {
         stage('Build') {
@@ -89,7 +90,7 @@ pipeline {
                         "$T/venv/bin/pip" install --isolated -q "requests>=2.33" "urllib3>=2.8"
                         "$T/venv/bin/pip" install --isolated -q --no-deps "veracode-api-signing>=24.0"
                         "$T/venv/bin/python" -I "$T/vbi.py" --commit "$VBI_COMMIT" --repo-dir "$WORKSPACE" \
-                            --default-branch "$DEFAULT_BRANCH" --wait 60
+                            ${VBI_REPO:+--repo "$VBI_REPO"} --default-branch "$DEFAULT_BRANCH" --wait 60
                     '''
                 }
             }

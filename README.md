@@ -34,14 +34,14 @@ Findings are sorted NEW first, then by severity. Closed findings and approved mi
 ## Setup
 
 1. Make the scan step follow the naming above (both examples do).
-2. Add the report step after the scan step. Pin the script to a release tag and check its SHA-256 (listed in the release notes), as the examples do, or copy the file into your repository. macOS agents: `shasum -a 256 -c` instead of `sha256sum -c`.
+2. Add the report step after the scan step. Pin the script to a release tag and check its SHA-256 (listed in the release notes), as the examples do, or copy the file into your repository. The examples pin the Veracode CLI and API wrapper the same way; to upgrade one, change its version and checksum together. macOS agents: `shasum -a 256 -c` instead of `sha256sum -c`.
 3. Add the credentials:
 
 | Name | Where | Needed for |
 |---|---|---|
 | `VERACODE_API_ID`, `VERACODE_API_KEY` | Pipelines secured variables / Jenkins credentials | Always. API service account: **Upload and Scan API** (scan step) + **Results API** (report step). The report step alone only needs Results API |
 | `BITBUCKET_TOKEN` | Jenkins credentials | Jenkins (Cloud or Data Center). Not needed in Bitbucket Pipelines |
-| `BITBUCKET_URL` | Environment | Data Center only, e.g. `https://bitbucket.example.com` |
+| `BITBUCKET_URL` | Environment | Data Center only, e.g. `https://bitbucket.example.com` (plain `http://` works but prints a warning: the token is sent unencrypted) |
 
 Bitbucket tokens need **repository read**: a Cloud repository access token, or a Data Center HTTP access token. On Data Center only the user that created a report can replace it, so always use the same token.
 
@@ -53,7 +53,7 @@ Other environment variables:
 | `BITBUCKET_USER` | Cloud: account email when `BITBUCKET_TOKEN` is an Atlassian API token (Basic auth) |
 | `BITBUCKET_DEFAULT_BRANCH` | Same as `--default-branch` |
 | `BITBUCKET_PROXY` | Pipelines proxy (default `http://localhost:29418`; use `http://host.docker.internal:29418` inside a pipe) |
-| `VERACODE_API_BASE` | Veracode API host. Default: chosen from the API ID region (US, EU, FedRAMP) |
+| `VERACODE_API_BASE` | Veracode API host, `https://` only. Default: chosen from the API ID region (US, EU, FedRAMP) |
 
 The older names `VERACODE_API_KEY_ID` / `VERACODE_API_KEY_SECRET` and `~/.veracode/credentials` also work.
 
@@ -107,6 +107,8 @@ Drop `--dry-run` and set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data Center)
 | `ERROR: set BITBUCKET_TOKEN` | Running outside Pipelines without a token | Add the token credential |
 | `ERROR: could not read the default branch` | Token cannot read the repository, or the proxy refuses the lookup | Pass `--default-branch` |
 | `ERROR: repository ... not found on ...` | Wrong Data Center project key or slug, or the token lacks access | Check `GIT_URL` / `--repo`; personal repos use `~user` |
+| Jenkins fork PR report goes to the fork, or `repository ... not found` | The fork checkout's `GIT_URL` points at the fork | Set `VBI_REPO` in the Jenkinsfile (passes `--repo`) |
+| `WARNING: BITBUCKET_URL uses http://` | Data Center URL is not https | Use the server's https URL |
 | `ERROR: detached HEAD` / `could not detect ...` | No branch or repo in the CI variables | Pass `--branch` / `--repo` |
 | `ERROR: Bitbucket Data Center needs the full 40-character commit SHA` | Short `--commit` that the checkout cannot expand | Pass the full SHA |
 | `ERROR: Bitbucket add annotations failed: HTTP 400` (Data Center) | The instance allows fewer than 1000 annotations per report | Raise the server limit; the report says the annotations are incomplete |
