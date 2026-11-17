@@ -2,21 +2,29 @@
 // Works with Bitbucket Data Center and Bitbucket Cloud.
 //
 //   Default branch   -> Policy Scan
-//   Other branches   -> Sandbox scan (sandbox = branch name), also for PR builds
+//   Other branches   -> Sandbox scan (sandbox = branch name)
+//   Fork PRs         -> Sandbox scan named PR-<n> (fork branch names can clash)
+//   Pull requests    -> always a sandbox scan, never the policy scan
 //
-// Needs: the Veracode Jenkins Plugin (Veracode Scan), python3 + git on the agent.
+// Needs: the Veracode Jenkins Plugin (Veracode Scan); Linux/macOS agents with git,
+// curl, sha256sum and python3 with venv (Debian/Ubuntu: apt install python3-venv).
+// Windows agents: use bat, certutil -hashfile and venv\Scripts\python instead.
 // Credentials (Manage Jenkins > Credentials):
 //   <veracode-api>     Username/password: Veracode API ID / API key
-//   <bitbucket-token>  Secret text: Bitbucket HTTP access token (Data Center)
-//                      or repository access token (Cloud), repository write
-// Data Center only: set BITBUCKET_URL below. Leave it empty for Cloud.
-// PR builds: prefer the "current pull request revision" checkout strategy.
+//                      (API account roles: Upload and Scan API + Results API)
+//   <bitbucket-token>  Secret text: Data Center HTTP access token, or Cloud repository
+//                      access token; repository read is enough
+//                      (Cloud Atlassian API token: also set BITBUCKET_USER to the email)
+// PR builds: "current pull request revision" and "merge with target" both work.
 
 pipeline {
     agent any
     environment {
-        BITBUCKET_URL = 'https://bitbucket.example.com'   // '' for Bitbucket Cloud
+        BITBUCKET_URL = ''              // Data Center: 'https://bitbucket.example.com'; '' = Bitbucket Cloud
         DEFAULT_BRANCH = 'main'
+        VERACODE_APP_NAME = '<Veracode application profile name>'
+        VBI_REF = 'v1.0.0'              // release tag (or a full commit SHA) of the report script
+        VBI_SHA256 = '46587fcde05685622fb6a354f61e9e4d9a1e9d32c5e12c5814e3cc1b47d84b0c'
     }
     stages {
         stage('Build') {
@@ -28,30 +36,32 @@ pipeline {
             steps {
                 script {
                     def branch = env.CHANGE_BRANCH ?: env.BRANCH_NAME
-                    def isDefault = branch == env.DEFAULT_BRANCH
-                    // The scan version starts with the commit SHA: the report step
-                    // uses it to post results on the right commit. A "merge with
-                    // target" PR build uses a local merge commit; its first parent
-                    // is the PR head commit (the report step does the same).
-                    def sha = sh(returnStdout: true, script: '''
-                        if [ -n "$CHANGE_ID" ] && [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -gt 2 ]; then
-                            git rev-parse HEAD^1
-                        else
-                            git rev-parse HEAD
+                    def isDefault = env.CHANGE_ID == null && branch == env.DEFAULT_BRANCH
+                    def sandbox = env.CHANGE_FORK ? env.BRANCH_NAME : branch   // fork PRs: PR-<n> (the report script does the same)
+                    // The scan version starts with the commit SHA: the report step uses it to
+                    // post results on the right commit. A "merge with target" PR build checks
+                    // out a merge commit that exists only on this agent; its first parent is
+                    // the PR head (the report script applies the same rule).
+                    env.VBI_COMMIT = sh(returnStdout: true, script: '''
+                        sha=$(git rev-parse HEAD)
+                        if [ -n "$CHANGE_ID" ] && [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3 ] \
+                           && out=$(git branch -r --contains HEAD) && [ -z "$out" ]; then
+                            sha=$(git rev-parse HEAD^1)
                         fi
+                        echo "$sha"
                     ''').trim()
-                    def scanName = "${sha.substring(0, 12)}-${env.BUILD_NUMBER}"
+                    def scanName = "${env.VBI_COMMIT.substring(0, 12)}-${env.BUILD_NUMBER}"
                     withCredentials([usernamePassword(credentialsId: '<veracode-api>',
                                                       usernameVariable: 'VERACODE_API_ID',
                                                       passwordVariable: 'VERACODE_API_KEY')]) {
-                        veracode applicationName: '<Veracode application profile name>',
+                        veracode applicationName: env.VERACODE_APP_NAME,
                                  createProfile: false,
-                                 sandboxName: isDefault ? '' : branch,
+                                 sandboxName: isDefault ? '' : sandbox,
                                  createSandbox: !isDefault,
                                  scanName: scanName,
                                  uploadIncludesPattern: '<artifacts to upload, e.g. target/*.war>',
                                  waitForScan: false,
-                                 deleteIncompleteScanLevel: '2',
+                                 deleteIncompleteScanLevel: isDefault ? '1' : '2',   // never delete a running policy scan
                                  canFailJob: true,
                                  vid: VERACODE_API_ID,
                                  vkey: VERACODE_API_KEY
@@ -65,11 +75,21 @@ pipeline {
                                                   usernameVariable: 'VERACODE_API_ID',
                                                   passwordVariable: 'VERACODE_API_KEY'),
                                  string(credentialsId: '<bitbucket-token>', variable: 'BITBUCKET_TOKEN')]) {
+                    // A fresh folder outside the checkout, a new venv each run, pip --isolated and
+                    // "python -I": files in the checkout and earlier build steps cannot swap the
+                    // script, its modules or its package index while secrets are loaded.
+                    // Untrusted fork PRs still run their own build code on this agent: build them
+                    // on a fresh agent or container if they can reach these credentials.
                     sh '''
-                        python3 -m venv .vc-venv
-                        .vc-venv/bin/pip install -q requests veracode-api-signing
-                        curl -fsSLO https://raw.githubusercontent.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights/main/veracode_bb_insights.py
-                        .vc-venv/bin/python veracode_bb_insights.py --default-branch "$DEFAULT_BRANCH" --wait 60
+                        T=$(mktemp -d)
+                        trap 'rm -rf "$T"' EXIT
+                        curl -fsSLo "$T/vbi.py" "https://raw.githubusercontent.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights/$VBI_REF/veracode_bb_insights.py"
+                        echo "$VBI_SHA256  $T/vbi.py" | sha256sum -c -
+                        python3 -m venv "$T/venv"
+                        "$T/venv/bin/pip" install --isolated -q "requests>=2.33" "urllib3>=2.8"
+                        "$T/venv/bin/pip" install --isolated -q --no-deps "veracode-api-signing>=24.0"
+                        "$T/venv/bin/python" -I "$T/vbi.py" --commit "$VBI_COMMIT" --repo-dir "$WORKSPACE" \
+                            --default-branch "$DEFAULT_BRANCH" --wait 60
                     '''
                 }
             }
