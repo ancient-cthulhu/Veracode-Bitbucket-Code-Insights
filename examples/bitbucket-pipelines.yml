@@ -10,10 +10,12 @@
 # Repository variables (Repository settings > Pipelines > Repository variables):
 #   VERACODE_API_ID     Veracode API ID   (Secured)
 #   VERACODE_API_KEY    Veracode API key  (Secured)
+#                       API account roles: Upload and Scan API + Results API
 #   VERACODE_APP_NAME   Optional. Default: <workspace>/<repo>
 #
 # No Bitbucket token is needed: the report step uses the Pipelines proxy.
-# If your default branch is not "main", change "main" in both places below.
+# If your default branch is not "main", change "main" in all three places below
+# (the scan step "if", --default-branch, and the "branches:" key).
 # =============================================================================
 
 image: maven:3.9-eclipse-temurin-17
@@ -38,28 +40,36 @@ definitions:
         script:
           - apt-get update -qq && apt-get install -y -qq unzip >/dev/null
           - BASE="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java"
-          - WRAPPER=$(curl -fsS "$BASE/maven-metadata.xml" | grep -oPm1 "(?<=<latest>)[^<]+")
+          - WRAPPER=$(curl -fsS "$BASE/maven-metadata.xml" | sed -n 's:.*<latest>\(.*\)</latest>.*:\1:p')
           - curl -fsSL "$BASE/$WRAPPER/vosp-api-wrappers-java-$WRAPPER-dist.zip" -o dist.zip
           - unzip -oq dist.zip -d .veracode && cp "$(find .veracode -name 'VeracodeJavaAPI*.jar' | head -n1)" VeracodeJavaAPI.jar
           - |
             set -- -appname "${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}" \
                    -version "$(echo "$BITBUCKET_COMMIT" | cut -c1-12)-${BITBUCKET_BUILD_NUMBER}" \
-                   -filepath verascan -createprofile false -deleteincompletescan 2
-            if [ "$BITBUCKET_BRANCH" != "main" ]; then
-              set -- "$@" -sandboxname "$BITBUCKET_BRANCH" -createsandbox true
+                   -filepath verascan -createprofile false
+            if [ "$BITBUCKET_BRANCH" = "main" ]; then
+              set -- "$@" -deleteincompletescan 1        # never delete a policy scan still running
+            else
+              set -- "$@" -sandboxname "$BITBUCKET_BRANCH" -createsandbox true -deleteincompletescan 2
             fi
             java -jar VeracodeJavaAPI.jar -vid "$VERACODE_API_ID" -vkey "$VERACODE_API_KEY" \
                  -action UploadAndScan "$@"
 
     # Wait for the results and post them as a Code Insights report.
+    # The script is pinned to a release and checked against its SHA-256, and it runs
+    # from /tmp with "python -I" so files in the checkout cannot replace its modules.
     - step: &code-insights
         name: Veracode Code Insights
         image: python:3.12
+        caches:
+          - pip
         script:
-          - pip install -q requests veracode-api-signing
-          # Pin to a tag or commit instead of main for stable builds.
-          - curl -fsSLO https://raw.githubusercontent.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights/main/veracode_bb_insights.py
-          - python veracode_bb_insights.py --default-branch main --wait 60
+          - VBI_REF=v1.0.0
+          - VBI_SHA256=46587fcde05685622fb6a354f61e9e4d9a1e9d32c5e12c5814e3cc1b47d84b0c
+          - curl -fsSLo /tmp/vbi.py "https://raw.githubusercontent.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights/$VBI_REF/veracode_bb_insights.py"
+          - echo "$VBI_SHA256  /tmp/vbi.py" | sha256sum -c -
+          - pip install -q "requests>=2.33" "urllib3>=2.8" && pip install -q --no-deps "veracode-api-signing>=24.0"
+          - python -I /tmp/vbi.py --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch main --wait 60
 
 pipelines:
   branches:
