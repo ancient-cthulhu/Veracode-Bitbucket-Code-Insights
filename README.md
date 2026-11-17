@@ -81,7 +81,7 @@ Exit codes:
 ## Run locally
 
 ```bash
-pip install -r requirements.txt
+pip install --no-deps -r requirements.txt   # skips httpie, which veracode-api-signing declares but this tool never uses
 export VERACODE_API_ID=... VERACODE_API_KEY=...
 python veracode_bb_insights.py --commit <sha> --branch feature/PAY-12 --repo acme/payments-api \
   --default-branch main --dry-run
@@ -135,5 +135,5 @@ Drop `--dry-run` and set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data Center)
 | File | Purpose |
 |---|---|
 | `veracode_bb_insights.py` | The report step |
-| `requirements.txt` | `requests` and its TLS dependencies, `veracode-api-signing`, with safe minimum versions |
+| `requirements.txt` | Every package the script imports, with safe minimum versions and major-version caps; install with `--no-deps` |
 | `examples/` | Bitbucket Pipelines and Jenkins examples |

@@ -19,7 +19,7 @@
 #
 # The report script, the Veracode CLI and the API wrapper are pinned to a version and
 # checked against their SHA-256, because secured variables are available to every step.
-# Python packages are capped at the next major version. To upgrade a tool, change the
+# Python packages are capped at the next major version (not hash-pinned). To upgrade a tool, change the
 # version and its checksum together (sha256sum of the downloaded file):
 #   latest CLI:     curl -fsS https://tools.veracode.com/veracode-cli/LATEST_VERSION
 #   latest wrapper: <release> in https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml

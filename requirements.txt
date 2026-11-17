@@ -1,5 +1,7 @@
-requests>=2.33
-urllib3>=2.8
+requests>=2.33,<3
+urllib3>=2.8,<3
 certifi>=2026.10.18
-idna>=3.15
-veracode-api-signing>=24.0
+idna>=3.15,<4
+charset-normalizer>=3.4,<4
+# install with --no-deps: its declared dependency httpie (and pygments) is never used
+veracode-api-signing>=24.0,<27
