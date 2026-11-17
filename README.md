@@ -2,7 +2,7 @@
 
 Shows Veracode SAST findings that violate policy **inline in Bitbucket pull requests** and on commits, as a Code Insights report. Works with Bitbucket Cloud and Bitbucket Data Center, from Bitbucket Pipelines or Jenkins. Python 3.10+.
 
-Start here: [`examples/bitbucket-pipelines.yml`](examples/bitbucket-pipelines.yml) (Pipelines, Cloud) · [`examples/Jenkinsfile`](examples/Jenkinsfile) (Jenkins, Data Center or Cloud)
+Start here: [Get started](#get-started) · [`examples/bitbucket-pipelines.yml`](examples/bitbucket-pipelines.yml) (Pipelines, Cloud) · [`examples/Jenkinsfile`](examples/Jenkinsfile) (Jenkins, Data Center or Cloud) · [Troubleshooting](#troubleshooting)
 
 ## What developers see
 
@@ -31,11 +31,59 @@ Findings are sorted NEW first, then by severity. Closed findings and approved mi
 
 **Detection order:** commit `--commit`, `BITBUCKET_COMMIT`, `GIT_COMMIT`, `git rev-parse HEAD`. Branch `--branch`, `BITBUCKET_BRANCH`, `CHANGE_BRANCH`, `BRANCH_NAME` (used as given), then `GIT_BRANCH` or git with `origin/` removed. Repository `--repo`, `BITBUCKET_WORKSPACE` + `BITBUCKET_REPO_SLUG`, `GIT_URL`, `git remote get-url origin`. In Jenkins PR builds (`CHANGE_ID`), a merge commit that exists only on the agent ("merge with target" strategy) is replaced by its first parent, the PR head; this needs the PR head fetched as a remote branch, which is the Branch Source default. Merge builds scan the merged code, so line numbers can be off in files changed on both sides; "current pull request revision" avoids that.
 
-## Setup
+## Get started
 
-1. Make the scan step follow the naming above (both examples do).
-2. Add the report step after the scan step. Pin the script to a release tag and check its SHA-256 (listed in the release notes), as the examples do, or copy the file into your repository. The examples pin the Veracode CLI and API wrapper the same way; to upgrade one, change its version and checksum together. macOS agents: `shasum -a 256 -c` instead of `sha256sum -c`.
-3. Add the credentials:
+You don't need to clone or fork this repository. The report step downloads a released version of `veracode_bb_insights.py` and checks its SHA-256, so you only copy one example file into your repository. Clone it only to [run it locally](#run-locally) or to [host your own copy](#no-github-access-from-ci).
+
+### Before you start
+
+| Need | Details |
+|---|---|
+| Veracode API service account | Roles **Upload and Scan API** and **Results API**, with access to the application profile's team |
+| Veracode application profile | Must already exist (the examples don't create profiles). Name it `<workspace>/<repo>`, `<PROJECT>/<repo>` or `<repo>`, or set `VERACODE_APP_NAME` |
+| Network access from CI | `raw.githubusercontent.com` (script), `pypi.org` (Python packages), `tools.veracode.com` and `repo1.maven.org` (Veracode CLI and API wrapper), the Veracode API (`api.veracode.com`, `.eu` or `.us`), and Bitbucket |
+| Bitbucket | Cloud, or Data Center with Code Insights (5.15 or later) |
+
+### Bitbucket Pipelines (Cloud)
+
+1. Copy [`examples/bitbucket-pipelines.yml`](examples/bitbucket-pipelines.yml) to the root of your repository as `bitbucket-pipelines.yml` (or copy its three steps into your existing file).
+2. Edit the **Package** step for your application: it uses a Maven/Java 17 image and the Veracode CLI autopackager (`veracode package`). Use an image that can build your language, or replace the step with your own build that puts the files to scan in `verascan/`.
+3. If your default branch isn't `main`, change `main` in the three places marked in the file.
+4. Enable Pipelines (**Repository settings > Pipelines > Settings**).
+5. Add the repository variables (**Repository settings > Pipelines > Repository variables**): `VERACODE_API_ID` and `VERACODE_API_KEY`, both **Secured**. Add `VERACODE_APP_NAME` if the profile name differs from the repository name. No Bitbucket token is needed.
+6. Push a branch and open a pull request. When the pipeline finishes, the **Veracode SAST** report is on the commit and in the PR's **Reports**, with annotations on changed lines.
+
+### Jenkins (Data Center or Cloud)
+
+1. Install the **Veracode Scan** and **Bitbucket Branch Source** plugins. Agents need Linux or macOS with `git`, `curl`, `sha256sum` and Python 3.10+ with `venv`.
+2. Add two credentials (**Manage Jenkins > Credentials**):
+   - Username with password: Veracode API ID / API key.
+   - Secret text: a Bitbucket token with **repository read** (Data Center HTTP access token, or Cloud repository access token).
+3. Copy [`examples/Jenkinsfile`](examples/Jenkinsfile) to the root of your repository and edit:
+   - `BITBUCKET_URL`: your Data Center URL, or `''` for Bitbucket Cloud.
+   - `DEFAULT_BRANCH` and `VERACODE_APP_NAME`.
+   - `<veracode-api>` and `<bitbucket-token>`: your credential IDs.
+   - The **Build** stage and `uploadIncludesPattern`: your build and the files to scan.
+   - `VBI_REPO`: only if you build fork PRs.
+4. Create a **Multibranch Pipeline** job with a Bitbucket branch source for the repository, discovering branches and pull requests.
+5. Push a branch and open a pull request. When the build finishes, the report is on the commit and the PR.
+
+Leave `VBI_REF` and `VBI_SHA256` as they are; they select the release of the script. To upgrade, copy both from the newer release's notes. The examples pin the Veracode CLI and API wrapper the same way: change a version and its checksum together. macOS agents: `shasum -a 256 -c` instead of `sha256sum -c`.
+
+### No GitHub access from CI
+
+Host the script yourself and keep the checksum check:
+
+```bash
+git clone https://github.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights.git
+cd Veracode-Bitbucket-Code-Insights
+git checkout v1.0.0
+sha256sum veracode_bb_insights.py   # must equal VBI_SHA256 in the examples (Linux/macOS checkout; Windows may change line endings)
+```
+
+Publish `veracode_bb_insights.py` to an internal location your CI can read (for example Artifactory, or a tools repository in your Bitbucket) and replace the `raw.githubusercontent.com` URL in the `curl` line of the example. For a PyPI mirror, add `--index-url https://<mirror>/simple` to the `pip install` commands.
+
+### Credentials and variables
 
 | Name | Where | Needed for |
 |---|---|---|
@@ -80,10 +128,13 @@ Exit codes:
 
 ## Run locally
 
+Useful to check the profile, sandbox and file matching before setting up CI. Run it from a checkout of your application repository, at the commit that was scanned.
+
 ```bash
-pip install --no-deps -r requirements.txt   # skips httpie, which veracode-api-signing declares but this tool never uses
+git clone https://github.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights.git ~/vbi
+pip install --no-deps -r ~/vbi/requirements.txt   # skips httpie, which veracode-api-signing declares but this tool never uses
 export VERACODE_API_ID=... VERACODE_API_KEY=...
-python veracode_bb_insights.py --commit <sha> --branch feature/PAY-12 --repo acme/payments-api \
+python ~/vbi/veracode_bb_insights.py --commit <sha> --branch feature/PAY-12 --repo acme/payments-api \
   --default-branch main --dry-run
 ```
 
