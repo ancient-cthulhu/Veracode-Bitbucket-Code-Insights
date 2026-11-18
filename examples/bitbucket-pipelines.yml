@@ -86,7 +86,19 @@ definitions:
         image: python:3.12
         script:
           - VBI_URL="<download URL of veracode_bb_insights.py in your organization>"
-          - curl -fsSL -o /tmp/vbi.py "$VBI_URL"
+          - |
+            if [ -n "${VBI_TOKEN:-}" ]; then
+              echo "Downloading VBI script with authentication"
+              curl -fsSL \
+                -H "Authorization: Bearer $VBI_TOKEN" \
+                -o /tmp/vbi.py \
+                "$VBI_URL"
+            else
+              echo "Downloading VBI script without authentication"
+              curl -fsSL \
+                -o /tmp/vbi.py \
+                "$VBI_URL"
+            fi
           - 'head -n1 /tmp/vbi.py | grep -q python || { echo "VBI_URL did not return the script (a web or login page?). Use the raw file URL, see docs/SETUP.md step 0."; exit 1; }'
           - pip install -q "requests>=2.33,<3" "urllib3>=2.8,<3" && pip install -q --no-deps "veracode-api-signing>=24.0,<27"
           - python -I /tmp/vbi.py --sync --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch "${DEFAULT_BRANCH:-main}"
@@ -98,7 +110,19 @@ definitions:
           download: false
         script:
           - VBI_URL="<download URL of veracode_bb_insights.py in your organization>"
-          - curl -fsSL -o /tmp/vbi.py "$VBI_URL"
+          - |
+            if [ -n "${VBI_TOKEN:-}" ]; then
+              echo "Downloading VBI script with authentication"
+              curl -fsSL \
+                -H "Authorization: Bearer $VBI_TOKEN" \
+                -o /tmp/vbi.py \
+                "$VBI_URL"
+            else
+              echo "Downloading VBI script without authentication"
+              curl -fsSL \
+                -o /tmp/vbi.py \
+                "$VBI_URL"
+            fi
           - 'head -n1 /tmp/vbi.py | grep -q python || { echo "VBI_URL did not return the script (a web or login page?). Use the raw file URL, see docs/SETUP.md step 0."; exit 1; }'
           - pip install -q "requests>=2.33,<3" "urllib3>=2.8,<3" && pip install -q --no-deps "veracode-api-signing>=24.0,<27"
           - python -I /tmp/vbi.py --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch "${DEFAULT_BRANCH:-main}" --wait 60
