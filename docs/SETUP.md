@@ -2,12 +2,47 @@
 
 From the Veracode account to the first report. Developers: [DEVELOPERS.md](DEVELOPERS.md). Back to the [README](../README.md).
 
+0. [Host the script](#0-host-the-script) (once)
 1. [Veracode](#1-veracode) (once)
 2. [Bitbucket Pipelines](#2a-bitbucket-pipelines-cloud) or [Jenkins](#2b-jenkins-data-center-or-cloud) (per repository)
 3. [Check the first run](#3-check-the-first-run)
 4. [Merge gate](#4-optional-merge-gate) (optional)
 
-No clone needed: you copy one example file into each repository, and CI downloads a pinned, checksum-verified copy of the script. CI without GitHub access: [Host your own copy](#host-your-own-copy).
+## 0. Host the script
+
+Keep your own copy. CI downloads it from there and checks its SHA-256 before running it.
+
+1. Copy this repository into a tools repository in your Bitbucket (or put `veracode_bb_insights.py` in Artifactory, Nexus or any internal HTTPS server):
+
+   ```bash
+   git clone https://github.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights.git
+   cd Veracode-Bitbucket-Code-Insights
+   git push <your tools repository clone URL> HEAD:main
+   ```
+
+2. Note the commit and checksum:
+
+   ```bash
+   git rev-parse HEAD                                  # COMMIT
+   git show HEAD:veracode_bb_insights.py | sha256sum   # VBI_SHA256
+   ```
+
+3. Build `VBI_URL`, pinned to that commit:
+
+   | Host | `VBI_URL` | Token |
+   |---|---|---|
+   | Bitbucket Cloud | `https://api.bitbucket.org/2.0/repositories/<workspace>/<repo>/src/<COMMIT>/veracode_bb_insights.py` | Repository access token on the tools repository, **Repositories: Read** |
+   | Bitbucket Data Center | `https://<bitbucket>/rest/api/latest/projects/<KEY>/repos/<repo>/raw/veracode_bb_insights.py?at=<COMMIT>` | HTTP access token with **Repository read** on it; none if the repository allows public access |
+   | Artifactory, Nexus, web server | The file's URL | If required |
+
+4. Test from a CI agent; it must print `VBI_SHA256`:
+
+   ```bash
+   curl -fsSL -H "Authorization: Bearer <token>" "<VBI_URL>" | sha256sum
+   ```
+
+> [!IMPORTANT]
+> The checksum is what makes the download safe: never update `VBI_SHA256` without reviewing the new version of the script.
 
 ## 1. Veracode
 
@@ -27,8 +62,9 @@ No clone needed: you copy one example file into each repository, and CI download
 2. Adapt the **Package for Veracode** step to your language (it uses a Maven/Java 17 image), or replace it with your build writing the files to scan into `verascan/` ([packaging guide](https://docs.veracode.com/r/compilation_packaging)).
 3. Default branch isn't `main`? Change `main` in the three places listed at the top of the file.
 4. **Repository settings > Pipelines > Settings**: enable Pipelines.
-5. **Repository settings > Pipelines > Repository variables**: add `VERACODE_API_ID` and `VERACODE_API_KEY` (both **Secured**), and `VERACODE_APP_NAME` if needed. No Bitbucket token needed.
-6. Push to the default branch.
+5. **Repository settings > Pipelines > Repository variables**: add `VERACODE_API_ID` and `VERACODE_API_KEY` (both **Secured**), and `VERACODE_APP_NAME` if needed. No Bitbucket token is needed.
+6. In `bitbucket-pipelines.yml`, set `VBI_URL` and `VBI_SHA256` from step 0. If the download needs a token, add it as the **Secured** variable `VBI_TOKEN`.
+7. Push to the default branch.
 
 ## 2b. Jenkins (Data Center or Cloud)
 
@@ -45,10 +81,10 @@ No clone needed: you copy one example file into each repository, and CI download
    | `BITBUCKET_URL` | Data Center URL, or `''` for Cloud |
    | `DEFAULT_BRANCH`, `VERACODE_APP_NAME` | Your values |
    | `VBI_REPO` | Only when building fork PRs: `<PROJECT or workspace>/<repo>` |
+   | `VBI_URL`, `VBI_SHA256` | From step 0 |
+   | `VBI_TOKEN_CREDENTIAL` | Secret text credential ID of the download token, or `''` if none |
    | `<veracode-api>`, `<bitbucket-token>` | Your credential IDs |
    | Build stage, `uploadIncludesPattern` | Your build and the files to scan |
-
-   Leave `VBI_REF` and `VBI_SHA256` as they are.
 6. **New Item > Multibranch Pipeline**, branch source **Bitbucket** (Data Center: add the server first under **Manage Jenkins > System > Bitbucket Endpoints**), with branch and pull request discovery.
 7. Push the Jenkinsfile to the default branch.
 
@@ -88,17 +124,7 @@ A branch report is FAILED only for `NEW` violations, so the gate blocks new prob
 |---|---|
 | More repositories | Repeat 1.1 and step 2. One API account serves all |
 | Shared secrets | Pipelines: **Workspace settings > Pipelines > Workspace variables**. Jenkins: folder credentials |
-| Upgrade the script | Copy `VBI_REF` + `VBI_SHA256` from the release notes |
+| Upgrade the script | Pull the new version into your copy, review it, then update the commit in `VBI_URL` and `VBI_SHA256` (step 0) |
 | Upgrade CLI / wrapper | Change version and checksum together (see the top of `bitbucket-pipelines.yml`) |
 | Rotate credentials | New HMAC credentials, update CI secrets, revoke the old ones |
 | Sandbox limit | Delete sandboxes of merged branches in Veracode |
-
-## Host your own copy
-
-```bash
-git clone https://github.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights.git
-cd Veracode-Bitbucket-Code-Insights && git checkout v1.0.0
-sha256sum veracode_bb_insights.py   # must equal VBI_SHA256 (Linux/macOS checkout)
-```
-
-Publish the file internally (Artifactory, a tools repository) and change the `curl` URL in the example. Internal PyPI mirror: add `--index-url https://<mirror>/simple` to `pip install`.

@@ -7,7 +7,7 @@ Shows Veracode SAST findings that violate policy **inline in Bitbucket pull requ
 - **Examples:** [`bitbucket-pipelines.yml`](examples/bitbucket-pipelines.yml) (Cloud) · [`Jenkinsfile`](examples/Jenkinsfile) (Data Center or Cloud)
 - **Problems:** [Troubleshooting](#troubleshooting)
 
-No clone needed: CI downloads a pinned, checksum-verified copy of the script.
+Host your own copy of the script ([SETUP step 0](docs/SETUP.md#0-host-the-script)); CI downloads it from there and checks its SHA-256.
 
 ## What developers see
 
@@ -89,7 +89,7 @@ Also accepted: `VERACODE_API_KEY_ID` / `VERACODE_API_KEY_SECRET`, `~/.veracode/c
 From a checkout of your application at the scanned commit:
 
 ```bash
-git clone https://github.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights.git ~/vbi
+git clone <your copy of this repository> ~/vbi
 pip install --no-deps -r ~/vbi/requirements.txt   # --no-deps skips httpie, which is never used
 export VERACODE_API_ID=... VERACODE_API_KEY=...
 python ~/vbi/veracode_bb_insights.py --commit <sha> --branch feature/PAY-12 --repo acme/payments-api \
@@ -125,8 +125,8 @@ To post: drop `--dry-run`, set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data C
 | `ERROR: Bitbucket ... HTTP 401/403` | Token scope, or (Data Center) another token created the report | Repository-read token; always the same one |
 | Report but no inline annotations | Annotations show on changed lines only | Open the report |
 | "not matched to a file" | Generated code, other module, duplicate names, no git | See "Veracode location"; check `--repo-dir` |
-| `curl: (22) ... 404` in the report step | `VBI_REF` isn't a published tag | Use a release tag |
-| `sha256sum: ... did NOT match` | Version and checksum don't belong together | Use the pair from the release notes, or `sha256sum` of the file |
+| `curl: (22) ... 404` or `401` in the report step | Wrong `VBI_URL`, or the download needs a token | Check the URL; set `VBI_TOKEN` (Pipelines) or `VBI_TOKEN_CREDENTIAL` (Jenkins) |
+| `sha256sum: ... did NOT match` | `VBI_SHA256` isn't the checksum of the file at `VBI_URL` (or `CLI_SHA256`/`WRAPPER_SHA256` of their versions) | Recompute it ([SETUP step 0](docs/SETUP.md#0-host-the-script)) |
 | Default branch scan step fails while a policy scan runs | A running policy scan is never deleted | Rerun when it finishes, or let the next merge scan |
 | Can't create a sandbox | Sandbox limit reached | Delete sandboxes of merged branches |
 | Data Center merge check: report missing | Key isn't `veracode-sast`, or commit not scanned | Fix the key; rerun |
