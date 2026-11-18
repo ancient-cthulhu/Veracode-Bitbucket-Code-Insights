@@ -3,13 +3,16 @@
 #
 # Rename to bitbucket-pipelines.yml, or copy the steps into your own file.
 #
-#   Push to the default branch -> Policy Scan
-#   Push to any other branch   -> Sandbox scan (sandbox = branch name)
-#   custom: veracode-sync      -> posts every finished scan as a report on its commit.
-#                                 Schedule it (docs/SETUP.md); builds don't wait for scans.
+#   Push or merge to main          -> Policy Scan
+#   Pull request into main         -> Sandbox scan (sandbox = source branch name)
+#   Other branches, PRs, tags      -> not scanned
+#   custom: veracode-sync          -> posts every finished scan as a report on its commit.
+#                                     Schedule it (docs/SETUP.md); builds don't wait for scans.
 #
-# Inline mode (report in the same build, the runner waits for the scan): add
-# "- step: *code-insights" after "- step: *scan".
+# Inline mode instead (report in the same pipeline, the runner waits for the scan): add
+# "- step: *code-insights" after "- step: *scan" in veracode-scan.
+#
+# Default branch isn't main? Change "main" in the two triggers at the end and set DEFAULT_BRANCH.
 #
 # Repository variables (Repository settings > Pipelines > Repository variables):
 #   VERACODE_API_ID     Veracode API ID   (Secured)
@@ -128,11 +131,22 @@ definitions:
           - python -I /tmp/vbi.py --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch "${DEFAULT_BRANCH:-main}" --wait 60
 
 pipelines:
-  default:            # every branch push (tags excluded)
-    - step: *package
-    - step: *scan
   custom:
+    veracode-scan:    # started by the triggers below
+      - step: *package
+      - step: *scan
     veracode-sync:    # schedule this one
       - step: *code-insights-sync
     veracode-report:  # Run pipeline on a commit to post its results now
       - step: *code-insights
+
+# Scan pushes and merges to the default branch, and pull requests into it.
+triggers:
+  repository-push:
+    - condition: BITBUCKET_BRANCH == "main"
+      pipelines:
+        - veracode-scan
+  pullrequest-push:
+    - condition: BITBUCKET_PR_DESTINATION_BRANCH == "main"
+      pipelines:
+        - veracode-scan

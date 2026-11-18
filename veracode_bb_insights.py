@@ -35,7 +35,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -110,10 +110,16 @@ def http_session(*, retry_post=False):
 
 
 def check(response, what):
-    """Raise a short, readable error (no headers, no secrets) for a failed call."""
+    """Raise a short, readable error (no request headers, no secrets) for a failed call.
+    HTML error pages come from a proxy or gateway, not the API: say so, keep their text."""
     if response.status_code >= 400:
-        body = " ".join((response.text or "").split())[:300]
-        raise SystemExit(f"ERROR: {what} failed: HTTP {response.status_code} {body}")
+        text = response.text or ""
+        if "html" in response.headers.get("Content-Type", "").lower():
+            text = "HTML page from a proxy or gateway, not the API: " + plain_text(text, 200)
+        body = " ".join(text.split())[:300]
+        trace = response.headers.get("Atl-Traceid") or response.headers.get("X-Request-Id") or ""
+        raise SystemExit(f"ERROR: {what} failed: HTTP {response.status_code} {body}"
+                         + (f" (trace ID {trace})" if trace else ""))
     return response
 
 
@@ -665,6 +671,7 @@ class Bitbucket:
     """Shared Code Insights client; subclasses define URLs and payload shapes."""
     LINK_TEXT_KEY = "text"
     RESULT = ("PASSED", "FAILED")
+    single_url = None       # URL to upload one annotation; None = bulk requests only
 
     def __init__(self, api, owner, slug, proxies=None, *, retry_post=False):
         self.api, self.owner, self.slug, self.proxies = api, owner, slug, proxies
@@ -683,18 +690,52 @@ class Bitbucket:
         self._call("DELETE", url, "delete report", ok404=True)
         self._call("PUT", url, "create report", json=self.report_body(report))
         body = [self.annotation_body(a) for a in annotations[:MAX_ANNOTATIONS]]
+        batches = self.batches(body)
+        rejected = []
         try:
-            for batch in self.batches(body):
-                self._call("POST", f"{url}/annotations", "add annotations", json=batch)
+            for n, batch in enumerate(batches, 1):
+                count = len(batch) if isinstance(batch, list) else len(body)
+                what = (f"add annotations (batch {n}/{len(batches)}: {count} annotations, "
+                        f"{len(json.dumps(batch)) // 1024 + 1} KB)")
+                try:
+                    self._call("POST", f"{url}/annotations", what, json=batch)
+                except SystemExit as error:
+                    if self.single_url is None:
+                        raise
+                    log(f"WARNING: {str(error).removeprefix('ERROR: ')}. Retrying them one at a time.")
+                    rejected += self.put_each(url, batch)
+            if body and len(rejected) == len(body):
+                raise SystemExit("ERROR: Bitbucket rejected every annotation (see above).")
         except (SystemExit, requests.RequestException):
-            note = "Annotations could not be uploaded; open the Veracode results for the full list. "
-            try:
-                self._call("PUT", url, "update report", json=self.report_body(
-                    {**report, "details": (note + report["details"])[:MAX_TEXT]}))
-            except (SystemExit, requests.RequestException):
-                pass
+            self.add_note(url, report, "Annotations could not be uploaded; open the Veracode results for the full list. ")
             raise
+        if rejected:
+            self.add_note(url, report, f"{len(rejected)} finding(s) were rejected by Bitbucket and are not shown "
+                                       "here; open the Veracode results for them. ")
         return self.commit_url(commit)
+
+    def put_each(self, url, batch):
+        """Upload annotations one by one; returns the ones Bitbucket rejects. Raises when
+        the first ones all fail: then it's the connection or permissions, not the content."""
+        rejected, error = [], None
+        for i, a in enumerate(batch):
+            try:
+                self._call("PUT", self.single_url(url, a), f"add annotation {a['external_id']}", json=a)
+            except SystemExit as e:
+                rejected.append(a)
+                error = e
+                log(f"  {a['external_id']} {a.get('path', '')}{':' + str(a['line']) if a.get('line') else ''}: "
+                    f"{str(e).removeprefix('ERROR: ')}")
+                if i == 4 and len(rejected) == 5:
+                    raise SystemExit(f"{error} (also for single annotations)") from None
+        return rejected
+
+    def add_note(self, url, report, note):
+        try:
+            self._call("PUT", url, "update report", json=self.report_body(
+                {**report, "details": (note + report["details"])[:MAX_TEXT]}))
+        except (SystemExit, requests.RequestException):
+            pass
 
     def posted_scan(self, commit):
         """Scan version shown on the commit's current report, or ''."""
@@ -746,6 +787,10 @@ class BitbucketCloud(Bitbucket):
     @staticmethod
     def batches(body):
         return [body[i:i + CLOUD_BATCH] for i in range(0, len(body), CLOUD_BATCH)]
+
+    @staticmethod
+    def single_url(url, annotation):
+        return f"{url}/annotations/{quote(annotation['external_id'], safe='')}"
 
     @classmethod
     def report_body(cls, report):

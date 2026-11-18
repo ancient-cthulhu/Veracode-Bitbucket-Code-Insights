@@ -37,7 +37,7 @@ Listed: open findings that violate policy, `NEW` first, then by severity. Approv
 3. The report always shows the branch's **latest** scan, on the commit it was made from (the SHA at the start of the scan version), so lines match. A scan whose version doesn't start with a SHA is shown on the current commit with a note.
 
 - **Profile:** `VERACODE_APP_NAME`, else `<workspace or PROJECT>/<repo>`, else `<repo>` (case ignored).
-- **Branch:** the sandbox is named after the branch; the default branch (`main`, or `DEFAULT_BRANCH` in the examples) gets the policy scan.
+- **Branch:** pushes and merges to the default branch get the policy scan; pull requests into it get a sandbox named after the source branch. Other branches aren't scanned (examples).
 - **File paths:** Veracode paths are matched to repository files by the longest common ending (`com/acme/Dao.java` → `src/main/java/com/acme/Dao.java`). No or ambiguous match: listed without a line.
 - **Severity:** Very High is `CRITICAL` on Cloud, `HIGH` on Data Center; High `HIGH`; Medium `MEDIUM`; lower `LOW`.
 - **Commit, branch, repository:** flags first, then CI variables (`BITBUCKET_*`, Jenkins `GIT_COMMIT`, `CHANGE_BRANCH`, `BRANCH_NAME`, `GIT_URL`), then git.
@@ -137,6 +137,7 @@ To post: drop `--dry-run`, set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data C
 | `ERROR: Bitbucket ... HTTP 401/403` | Token scope, or (Data Center) another token created the report | Repository-read token; always the same one |
 | Report but no inline annotations | Annotations show on changed lines only | Open the report |
 | "not matched to a file" | Generated code, other module, duplicate names, no git | See "Veracode location"; check `--repo-dir` |
+| `WARNING: ... add annotations (batch n/m ...) failed ... Retrying them one at a time` | Bitbucket refused a bulk upload (often an HTML 403 from a proxy or gateway) | Nothing to do: the annotations are re-sent one by one; any still refused are listed in the log and counted in the report. If every one fails, the step fails: send the trace ID to Atlassian support |
 | `SyntaxError` on `<!DOCTYPE html>` / `VBI_URL did not return the script` | `VBI_URL` is a web or login page, not the raw file | Use the raw URL ([SETUP step 0](docs/SETUP.md#0-get-the-script)); add the token if the repository is private |
 | `curl: (22) ... 404` or `401` in the report step | Wrong `VBI_URL`, or the download needs a token | Check the URL; set `VBI_TOKEN` (Pipelines) or `VBI_TOKEN_CREDENTIAL` (Jenkins) |
 | `sha256sum: ... did NOT match` (scan steps) | `CLI_SHA256`/`WRAPPER_SHA256` don't match their versions | Update version and checksum together |
