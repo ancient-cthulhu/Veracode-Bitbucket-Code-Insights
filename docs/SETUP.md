@@ -19,7 +19,6 @@ git clone https://github.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights.gi
 Then in the CI file (step 2) set:
 
 - `VBI_URL`: raw URL of `veracode_bb_insights.py` in your copy
-- `VBI_SHA256`: output of `sha256sum veracode_bb_insights.py`
 - `VBI_TOKEN` (Pipelines secured variable) or `VBI_TOKEN_CREDENTIAL` (Jenkins): only if that URL needs a token
 
 ## 1. Veracode
@@ -41,13 +40,13 @@ Then in the CI file (step 2) set:
 3. Default branch isn't `main`? Change `main` in the three places listed at the top of the file.
 4. **Repository settings > Pipelines > Settings**: enable Pipelines.
 5. **Repository settings > Pipelines > Repository variables**: add `VERACODE_API_ID` and `VERACODE_API_KEY` (both **Secured**), and `VERACODE_APP_NAME` if needed. No Bitbucket token is needed.
-6. Set `VBI_URL` and `VBI_SHA256` in `bitbucket-pipelines.yml` (step 0).
+6. Set `VBI_URL` in `bitbucket-pipelines.yml` (step 0).
 7. Push to the default branch.
 
 ## 2b. Jenkins (Data Center or Cloud)
 
 1. **Plugins:** Veracode Scan, Bitbucket Branch Source.
-2. **Agents:** Linux/macOS with `git`, `curl`, `sha256sum` and Python 3.10+ with `venv`.
+2. **Agents:** Linux/macOS with `git`, `curl` and Python 3.10+ with `venv`.
 3. **Bitbucket token, repository read:**
    - Data Center: **Repository settings > HTTP access tokens > Create token**, **Repository read** (or a project token under **Project settings** for all repositories).
    - Cloud: **Repository settings > Security > Access tokens**, **Repositories: Read**.
@@ -59,7 +58,7 @@ Then in the CI file (step 2) set:
    | `BITBUCKET_URL` | Data Center URL, or `''` for Cloud |
    | `DEFAULT_BRANCH`, `VERACODE_APP_NAME` | Your values |
    | `VBI_REPO` | Only when building fork PRs: `<PROJECT or workspace>/<repo>` |
-   | `VBI_URL`, `VBI_SHA256` | From step 0 |
+   | `VBI_URL` | From step 0 |
    | `VBI_TOKEN_CREDENTIAL` | Secret text credential ID of the download token, or `''` if none |
    | `<veracode-api>`, `<bitbucket-token>` | Your credential IDs |
    | Build stage, `uploadIncludesPattern` | Your build and the files to scan |
@@ -102,7 +101,7 @@ A branch report is FAILED only for `NEW` violations, so the gate blocks new prob
 |---|---|
 | More repositories | Repeat 1.1 and step 2. One API account serves all |
 | Shared secrets | Pipelines: **Workspace settings > Pipelines > Workspace variables**. Jenkins: folder credentials |
-| Upgrade the script | Pull the new version into your copy, then update `VBI_URL` and `VBI_SHA256` |
+| Upgrade the script | Pull the new version into your copy, then update `VBI_URL` if it changed |
 | Upgrade CLI / wrapper | Change version and checksum together (see the top of `bitbucket-pipelines.yml`) |
 | Rotate credentials | New HMAC credentials, update CI secrets, revoke the old ones |
 | Sandbox limit | Delete sandboxes of merged branches in Veracode |

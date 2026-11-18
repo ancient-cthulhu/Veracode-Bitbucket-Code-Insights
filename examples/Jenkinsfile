@@ -8,7 +8,7 @@
 //   Tags             -> not scanned
 //
 // Needs: the Veracode Jenkins Plugin (Veracode Scan); Linux/macOS agents with git,
-// curl, sha256sum and Python 3.10+ with venv (Debian/Ubuntu: apt install python3-venv).
+// curl and Python 3.10+ with venv (Debian/Ubuntu: apt install python3-venv).
 // Windows agents: use bat, certutil -hashfile and venv\Scripts\python instead.
 // Credentials (Manage Jenkins > Credentials):
 //   <veracode-api>     Username/password: Veracode API ID / API key
@@ -26,7 +26,6 @@ pipeline {
         VERACODE_APP_NAME = '<Veracode application profile name>'
         VBI_REPO = ''                   // '<workspace or PROJECT>/<repo>' when fork PRs are built: their GIT_URL can point at the fork
         VBI_URL = '<download URL of veracode_bb_insights.py in your organization>'   // docs/SETUP.md step 0
-        VBI_SHA256 = 'c5a275d6ae6b6b45f6e0d61e1c27b18ccd8b5b6854727e57929dc58f1352b616'
         VBI_TOKEN_CREDENTIAL = ''       // Secret text credential ID if VBI_URL needs a token (sent as Bearer); '' = none
     }
     stages {
@@ -106,7 +105,6 @@ pipeline {
                             T=$(mktemp -d)
                             trap 'rm -rf "$T"' EXIT
                             curl -fsSL ${VBI_TOKEN:+-H "Authorization: Bearer $VBI_TOKEN"} -o "$T/vbi.py" "$VBI_URL"
-                            echo "$VBI_SHA256  $T/vbi.py" | sha256sum -c -
                             python3 -m venv "$T/venv"
                             "$T/venv/bin/python" -m pip install --isolated -q "requests>=2.33,<3" "urllib3>=2.8,<3"
                             "$T/venv/bin/python" -m pip install --isolated -q --no-deps "veracode-api-signing>=24.0,<27"
