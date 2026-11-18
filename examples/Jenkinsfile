@@ -37,6 +37,7 @@ def runReport(String reportArgs) {
                 T=$(mktemp -d)
                 trap 'rm -rf "$T"' EXIT
                 curl -fsSL ${VBI_TOKEN:+-H "Authorization: Bearer $VBI_TOKEN"} -o "$T/vbi.py" "$VBI_URL"
+                head -n1 "$T/vbi.py" | grep -q python || { echo "VBI_URL did not return the script (a web or login page?). Use the raw file URL, see docs/SETUP.md step 0."; exit 1; }
                 python3 -m venv "$T/venv"
                 "$T/venv/bin/python" -m pip install --isolated -q "requests>=2.33,<3" "urllib3>=2.8,<3"
                 "$T/venv/bin/python" -m pip install --isolated -q --no-deps "veracode-api-signing>=24.0,<27"

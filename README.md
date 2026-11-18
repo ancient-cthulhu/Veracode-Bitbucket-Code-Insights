@@ -137,6 +137,7 @@ To post: drop `--dry-run`, set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data C
 | `ERROR: Bitbucket ... HTTP 401/403` | Token scope, or (Data Center) another token created the report | Repository-read token; always the same one |
 | Report but no inline annotations | Annotations show on changed lines only | Open the report |
 | "not matched to a file" | Generated code, other module, duplicate names, no git | See "Veracode location"; check `--repo-dir` |
+| `SyntaxError` on `<!DOCTYPE html>` / `VBI_URL did not return the script` | `VBI_URL` is a web or login page, not the raw file | Use the raw URL ([SETUP step 0](docs/SETUP.md#0-get-the-script)); add the token if the repository is private |
 | `curl: (22) ... 404` or `401` in the report step | Wrong `VBI_URL`, or the download needs a token | Check the URL; set `VBI_TOKEN` (Pipelines) or `VBI_TOKEN_CREDENTIAL` (Jenkins) |
 | `sha256sum: ... did NOT match` (scan steps) | `CLI_SHA256`/`WRAPPER_SHA256` don't match their versions | Update version and checksum together |
 | `Not scanned: the previous scan is still running` (Pipelines) / Jenkins scan stage fails with `A scan is in progress` | The previous policy scan is still running and is never deleted | Expected; the next push to the default branch scans the latest code. To replace running scans instead, use `-deleteincompletescan 2` |

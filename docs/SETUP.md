@@ -18,7 +18,10 @@ git clone https://github.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights.gi
 
 Then in the CI file (step 2) set:
 
-- `VBI_URL`: raw URL of `veracode_bb_insights.py` in your copy
+- `VBI_URL`: **raw** URL of `veracode_bb_insights.py` in your copy (not the page that shows the file):
+  - Bitbucket Cloud: `https://api.bitbucket.org/2.0/repositories/<workspace>/<repo>/src/main/veracode_bb_insights.py`
+  - Bitbucket Data Center: `https://<server>/rest/api/latest/projects/<KEY>/repos/<repo>/raw/veracode_bb_insights.py?at=refs/heads/main`
+  - GitHub: `https://raw.githubusercontent.com/<owner>/<repo>/main/veracode_bb_insights.py`
 - `VBI_TOKEN` (Pipelines secured variable) or `VBI_TOKEN_CREDENTIAL` (Jenkins): only if that URL needs a token
 
 ## 1. Veracode
