@@ -7,9 +7,11 @@
 //   Pull requests    -> always a sandbox scan, never the policy scan
 //   Tags             -> not scanned
 //
+// Reports are posted by a scheduled sync (every 20 minutes, from the default branch job),
+// so builds don't wait for scans. VBI_INLINE = 'true' also posts at the end of each build.
+//
 // Needs: the Veracode Jenkins Plugin (Veracode Scan); Linux/macOS agents with git,
 // curl and Python 3.10+ with venv (Debian/Ubuntu: apt install python3-venv).
-// Windows agents: use bat, certutil -hashfile and venv\Scripts\python instead.
 // Credentials (Manage Jenkins > Credentials):
 //   <veracode-api>     Username/password: Veracode API ID / API key
 //                      (API account roles: Upload and Scan API + Results API)
@@ -18,8 +20,38 @@
 //                      (Cloud Atlassian API token: also set BITBUCKET_USER to the email)
 // PR builds: "current pull request revision" and "merge with target" both work.
 
+// Downloads the report script into a fresh folder outside the checkout and runs it with
+// "python -I": files in the checkout cannot swap its modules or package index while
+// secrets are loaded. Internal PyPI mirror: add --index-url https://<mirror>/simple.
+def runReport(String reportArgs) {
+    def creds = [usernamePassword(credentialsId: '<veracode-api>',
+                                  usernameVariable: 'VERACODE_API_ID',
+                                  passwordVariable: 'VERACODE_API_KEY'),
+                 string(credentialsId: '<bitbucket-token>', variable: 'BITBUCKET_TOKEN')]
+    if (env.VBI_TOKEN_CREDENTIAL) {
+        creds << string(credentialsId: env.VBI_TOKEN_CREDENTIAL, variable: 'VBI_TOKEN')
+    }
+    withCredentials(creds) {
+        withEnv(["VBI_ARGS=${reportArgs}"]) {
+            sh '''
+                T=$(mktemp -d)
+                trap 'rm -rf "$T"' EXIT
+                curl -fsSL ${VBI_TOKEN:+-H "Authorization: Bearer $VBI_TOKEN"} -o "$T/vbi.py" "$VBI_URL"
+                python3 -m venv "$T/venv"
+                "$T/venv/bin/python" -m pip install --isolated -q "requests>=2.33,<3" "urllib3>=2.8,<3"
+                "$T/venv/bin/python" -m pip install --isolated -q --no-deps "veracode-api-signing>=24.0,<27"
+                "$T/venv/bin/python" -I "$T/vbi.py" --repo-dir "$WORKSPACE" ${VBI_REPO:+--repo "$VBI_REPO"} \
+                    --default-branch "$DEFAULT_BRANCH" $VBI_ARGS
+            '''
+        }
+    }
+}
+
 pipeline {
     agent any
+    triggers {
+        cron(env.BRANCH_NAME == 'main' ? 'H/20 * * * *' : '')   // 'main' = DEFAULT_BRANCH
+    }
     environment {
         BITBUCKET_URL = ''              // Data Center: 'https://bitbucket.example.com'; '' = Bitbucket Cloud
         DEFAULT_BRANCH = 'main'
@@ -27,18 +59,30 @@ pipeline {
         VBI_REPO = ''                   // '<workspace or PROJECT>/<repo>' when fork PRs are built: their GIT_URL can point at the fork
         VBI_URL = '<download URL of veracode_bb_insights.py in your organization>'   // docs/SETUP.md step 0
         VBI_TOKEN_CREDENTIAL = ''       // Secret text credential ID if VBI_URL needs a token (sent as Bearer); '' = none
+        VBI_INLINE = 'false'            // 'true': also wait for the scan and post at the end of each build
     }
     stages {
+        // Scheduled run: post every finished scan that has no report yet, then stop.
+        stage('Veracode sync') {
+            when { triggeredBy 'TimerTrigger' }
+            steps {
+                runReport('--sync')
+            }
+        }
         // Runs before any code from the branch or PR, so build steps cannot change
         // which commit receives the report.
         stage('Veracode commit') {
-            when { not { buildingTag() } }
+            when {
+                allOf {
+                    not { buildingTag() }
+                    not { triggeredBy 'TimerTrigger' }
+                }
+            }
             steps {
                 script {
-                    // The scan version starts with the commit SHA: the report step uses it to
-                    // post results on the right commit. A "merge with target" PR build checks
-                    // out a merge commit that exists only on this agent; its first parent is
-                    // the PR head (the report script applies the same rule).
+                    // The scan version is "<commit SHA>-<build number>": reports are posted on that
+                    // commit. A "merge with target" PR build checks out a merge commit that exists
+                    // only on this agent; its first parent is the PR head.
                     env.VBI_COMMIT = sh(returnStdout: true, script: '''
                         sha=$(git rev-parse HEAD)
                         if [ -n "$CHANGE_ID" ] && [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3 ] \
@@ -51,18 +95,23 @@ pipeline {
             }
         }
         stage('Build') {
+            when { not { triggeredBy 'TimerTrigger' } }
             steps {
                 sh '<your build, producing the artifacts to scan>'
             }
         }
         stage('Veracode scan') {
-            when { not { buildingTag() } }
+            when {
+                allOf {
+                    not { buildingTag() }
+                    not { triggeredBy 'TimerTrigger' }
+                }
+            }
             steps {
                 script {
                     def branch = env.CHANGE_BRANCH ?: env.BRANCH_NAME
                     def isDefault = env.CHANGE_ID == null && branch == env.DEFAULT_BRANCH
                     def sandbox = env.CHANGE_FORK ? env.BRANCH_NAME : branch   // fork PRs: PR-<n> (the report script does the same)
-                    def scanName = "${env.VBI_COMMIT.substring(0, 12)}-${env.BUILD_NUMBER}"
                     withCredentials([usernamePassword(credentialsId: '<veracode-api>',
                                                       usernameVariable: 'VERACODE_API_ID',
                                                       passwordVariable: 'VERACODE_API_KEY')]) {
@@ -70,7 +119,7 @@ pipeline {
                                  createProfile: false,
                                  sandboxName: isDefault ? '' : sandbox,
                                  createSandbox: !isDefault,
-                                 scanName: scanName,
+                                 scanName: "${env.VBI_COMMIT}-${env.BUILD_NUMBER}",
                                  uploadIncludesPattern: '<artifacts to upload, e.g. target/*.war>',
                                  waitForScan: false,
                                  // Never delete a running policy scan: a merge while the previous
@@ -83,36 +132,19 @@ pipeline {
                 }
             }
         }
+        // Optional inline report (VBI_INLINE = 'true'): holds the agent until the scan finishes.
+        // Untrusted fork PRs run their own build code on this agent: build them on a fresh
+        // agent or container if they can reach these credentials.
         stage('Veracode Code Insights') {
-            when { not { buildingTag() } }
-            steps {
-                script {
-                    def creds = [usernamePassword(credentialsId: '<veracode-api>',
-                                                  usernameVariable: 'VERACODE_API_ID',
-                                                  passwordVariable: 'VERACODE_API_KEY'),
-                                 string(credentialsId: '<bitbucket-token>', variable: 'BITBUCKET_TOKEN')]
-                    if (env.VBI_TOKEN_CREDENTIAL) {
-                        creds << string(credentialsId: env.VBI_TOKEN_CREDENTIAL, variable: 'VBI_TOKEN')
-                    }
-                    withCredentials(creds) {
-                        // A fresh folder outside the checkout, a new venv each run, pip --isolated and
-                        // "python -I": files in the checkout and earlier build steps cannot swap the
-                        // script, its modules or its package index while secrets are loaded.
-                        // Internal PyPI mirror: add --index-url https://<mirror>/simple (--isolated
-                        // ignores pip.conf). Untrusted fork PRs still run their own build code on this
-                        // agent: build them on a fresh agent or container if they can reach these credentials.
-                        sh '''
-                            T=$(mktemp -d)
-                            trap 'rm -rf "$T"' EXIT
-                            curl -fsSL ${VBI_TOKEN:+-H "Authorization: Bearer $VBI_TOKEN"} -o "$T/vbi.py" "$VBI_URL"
-                            python3 -m venv "$T/venv"
-                            "$T/venv/bin/python" -m pip install --isolated -q "requests>=2.33,<3" "urllib3>=2.8,<3"
-                            "$T/venv/bin/python" -m pip install --isolated -q --no-deps "veracode-api-signing>=24.0,<27"
-                            "$T/venv/bin/python" -I "$T/vbi.py" --commit "$VBI_COMMIT" --repo-dir "$WORKSPACE" \
-                                ${VBI_REPO:+--repo "$VBI_REPO"} --default-branch "$DEFAULT_BRANCH" --wait 60
-                        '''
-                    }
+            when {
+                allOf {
+                    not { buildingTag() }
+                    not { triggeredBy 'TimerTrigger' }
+                    environment name: 'VBI_INLINE', value: 'true'
                 }
+            }
+            steps {
+                runReport("--commit ${env.VBI_COMMIT} --wait 60")
             }
         }
     }

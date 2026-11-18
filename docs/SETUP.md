@@ -35,13 +35,26 @@ Then in the CI file (step 2) set:
 
 ## 2a. Bitbucket Pipelines (Cloud)
 
-1. Copy [`examples/bitbucket-pipelines.yml`](../examples/bitbucket-pipelines.yml) to the repository root as `bitbucket-pipelines.yml` (or merge its three steps into yours).
+1. Copy [`examples/bitbucket-pipelines.yml`](../examples/bitbucket-pipelines.yml) to the repository root as `bitbucket-pipelines.yml` (or merge its steps into yours).
 2. Adapt the **Package for Veracode** step to your language (it uses a Maven/Java 17 image), or replace it with your build writing the files to scan into `verascan/` ([packaging guide](https://docs.veracode.com/r/compilation_packaging)).
-3. Default branch isn't `main`? Change `main` in the three places listed at the top of the file.
+3. Default branch isn't `main`? Change `main` in the places listed at the top of the file.
 4. **Repository settings > Pipelines > Settings**: enable Pipelines.
 5. **Repository settings > Pipelines > Repository variables**: add `VERACODE_API_ID` and `VERACODE_API_KEY` (both **Secured**), and `VERACODE_APP_NAME` if needed. No Bitbucket token is needed.
 6. Set `VBI_URL` in `bitbucket-pipelines.yml` (step 0).
 7. Push to the default branch.
+8. Schedule the sync on the default branch:
+   - Hourly: **Pipelines > Schedules > New schedule**, pipeline **custom: veracode-sync**, **Hourly**.
+   - Every 20 minutes (API only), with a token that has **Pipelines: Write**:
+
+     ```bash
+     curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+       https://api.bitbucket.org/2.0/repositories/<workspace>/<repo>/pipelines_config/schedules/ \
+       -d '{"type": "pipeline_schedule", "enabled": true, "cron_pattern": "0 0/20 * * * ? *",
+            "target": {"type": "pipeline_ref_target", "ref_type": "branch", "ref_name": "main",
+                       "selector": {"type": "custom", "pattern": "veracode-sync"}}}'
+     ```
+
+   Inline mode instead: add `- step: *code-insights` after `- step: *scan` in both branch lists.
 
 ## 2b. Jenkins (Data Center or Cloud)
 
@@ -60,8 +73,10 @@ Then in the CI file (step 2) set:
    | `VBI_REPO` | Only when building fork PRs: `<PROJECT or workspace>/<repo>` |
    | `VBI_URL` | From step 0 |
    | `VBI_TOKEN_CREDENTIAL` | Secret text credential ID of the download token, or `''` if none |
+   | `VBI_INLINE` | `'true'` to also wait and post at the end of each build; default `'false'` (sync only) |
    | `<veracode-api>`, `<bitbucket-token>` | Your credential IDs |
    | Build stage, `uploadIncludesPattern` | Your build and the files to scan |
+   | `cron(env.BRANCH_NAME == 'main' ...)` | Your default branch. The default branch job runs the sync every 20 minutes |
 6. **New Item > Multibranch Pipeline**, branch source **Bitbucket** (Data Center: add the server first under **Manage Jenkins > System > Bitbucket Endpoints**), with branch and pull request discovery.
 7. Push the Jenkinsfile to the default branch.
 
@@ -70,27 +85,27 @@ Then in the CI file (step 2) set:
 
 ## 3. Check the first run
 
-1. **Default branch** (policy scan). The report step log ends with:
+1. **Default branch** (policy scan). After the scan finishes, the next sync run (or the inline step) logs:
 
    ```text
-   Veracode: application 'acme/payments-api', policy scan
-   Veracode: scan '1a2b3c4d5e6f-87' is ready
+   policy scan: scan '1a2b3c4d...-87' is ready
    Report: FAILED - 12 finding(s) violate the Veracode policy. ...
    Posted 12 annotation(s): https://bitbucket.org/acme/payments-api/commits/1a2b3c4d...
+   sandbox 'feature/x': skipped, scan '...' in progress: Scan In Process
    ```
 
    The link opens the commit with the **Veracode SAST (policy scan)** report.
 2. **Pull request:** push a branch with a change and open a PR. Its reports show **Veracode SAST (sandbox _branch_)**, the diff shows annotations.
 3. `Nothing posted: ...` or `ERROR: ...`: see [Troubleshooting](../README.md#troubleshooting).
 
-The report step waits up to 60 minutes (`--wait 60`). Longer scans: raise it, or post later with Pipelines **Run pipeline > custom: veracode-report** on the commit (Jenkins: rerun the build).
+To post one commit right away: Pipelines **Run pipeline > custom: veracode-report** on it (waits up to 60 minutes).
 
 ## 4. Optional: merge gate
 
 A branch report is FAILED only for `NEW` violations, so the gate blocks new problems, not existing ones.
 
 - **Data Center:** **Repository settings > Code Insights** (or **Project settings** for all repositories): report key `veracode-sast`, required status pass, no annotation requirement (that would also block on inherited findings).
-- **Cloud:** add `--fail-build` to the report command, then require **no failed builds** in the branch's merge checks. Blocking needs Premium with **Prevent a merge with unresolved merge checks**; otherwise it only warns.
+- **Cloud:** needs inline mode. Add `--fail-build` to the inline report command, then require **no failed builds** in the branch's merge checks. Blocking needs Premium with **Prevent a merge with unresolved merge checks**; otherwise it only warns.
 
 > [!NOTE]
 > `--fail-build` also fails the step when the scan has no usable result (failed, timed out) and turns default-branch builds red while it has violations. To gate only PRs, use a copy of the step with the flag for `default:` branches.
