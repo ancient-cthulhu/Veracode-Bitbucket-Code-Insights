@@ -26,11 +26,18 @@ Listed: open findings that violate policy, `NEW` first, then by severity. Approv
 
 ## How it works
 
-1. The scan step sets the scan version to `<commit SHA>-<build number>` and, on branches, the sandbox name to the branch name.
-2. The report step finds the application profile, waits for that scan and its policy evaluation, then replaces the `veracode-sast` report on the commit.
-3. Nothing is posted unless the latest scan is from this commit, so lines always match.
+1. The scan step uploads with the scan version `<commit SHA>-<build number>` and, on branches, the sandbox named after the branch. It doesn't wait.
+2. The report is posted on that commit, in one of two modes:
+
+   | Mode | How | Runner |
+   |---|---|---|
+   | **Scheduled** (default in the examples) | `--sync` every 20-60 min: for the policy scan and every sandbox, posts the latest finished scan if its commit has no report for it yet | Seconds per run |
+   | **Inline** | `--wait N` after the scan step: waits for this commit's scan, then posts | Busy until the scan finishes |
+
+3. Only scans named after a commit are posted, on that commit, so lines always match.
 
 - **Profile:** `VERACODE_APP_NAME`, else `<workspace or PROJECT>/<repo>`, else `<repo>` (case ignored).
+- **Branch:** the sandbox name. The policy scan is the default branch.
 - **File paths:** Veracode paths are matched to repository files by the longest common ending (`com/acme/Dao.java` → `src/main/java/com/acme/Dao.java`). No or ambiguous match: listed without a line.
 - **Severity:** Very High is `CRITICAL` on Cloud, `HIGH` on Data Center; High `HIGH`; Medium `MEDIUM`; lower `LOW`.
 - **Commit, branch, repository:** flags first, then CI variables (`BITBUCKET_*`, Jenkins `GIT_COMMIT`, `CHANGE_BRANCH`, `BRANCH_NAME`, `GIT_URL`), then git.
@@ -41,7 +48,7 @@ Jira tracks findings as tickets; this gives feedback on the commit and PR. Use b
 
 | Jira integration | This tool |
 |---|---|
-| Issues imported on a schedule | Report per scanned commit, from CI |
+| Issues imported on a schedule | Reports posted on a schedule or right after the scan, on the scanned commit |
 | App → project by default or custom field | App found by repository name, or `VERACODE_APP_NAME` |
 | Filters (all, latest scan, unmitigated, policy) | Open policy violations of this commit's scan, unmitigated |
 | Sandbox findings prefixed "Sandbox" | Sandbox in the report title; `NEW` vs the policy scan |
@@ -70,6 +77,8 @@ Also accepted: `VERACODE_API_KEY_ID` / `VERACODE_API_KEY_SECRET`, `~/.veracode/c
 | Flag | Default | Purpose |
 |---|---|---|
 | `--default-branch` | from Bitbucket | Set it in Pipelines (the proxy may refuse the lookup) |
+| `--sync` | off | Scheduled mode (see [How it works](#how-it-works)) |
+| `--max-age-days` | `14` | `--sync`: ignore scans older than this |
 | `--wait` | `20` | Minutes to wait for the scan |
 | `--fail-build` | off | Exit 2 when FAILED, 3 when the scan has no usable results |
 | `--dry-run` | off | Print the requests instead of posting |
@@ -80,7 +89,7 @@ Also accepted: `VERACODE_API_KEY_ID` / `VERACODE_API_KEY_SECRET`, `~/.veracode/c
 | Exit | Meaning |
 |---|---|
 | `0` | Posted, or nothing to post (reason printed) |
-| `1` | Configuration or API error (`ERROR: ...`) |
+| `1` | Configuration or API error (`ERROR: ...`). `--sync`: after the other scans were processed |
 | `2` | Report FAILED (`--fail-build`) |
 | `3` | Scan failed, timed out, or has no matching sandbox (`--fail-build`) |
 
@@ -104,6 +113,9 @@ To post: drop `--dry-run`, set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data C
 |---|---|---|
 | `Nothing posted: latest scan '...' is not named after a commit` | Scan version doesn't start with the SHA | Scan version `<sha>-<build number>` |
 | `Nothing posted: latest scan '...' is for another commit` | A newer push started a newer scan | Expected |
+| `--sync`: `skipped, ... in progress` / `already posted` / `older than 14 days` | Nothing new to post | Expected |
+| `--sync`: `skipped, commit not found in Bitbucket` | Branch deleted or rewritten | Expected |
+| `--sync`: `skipped, ... short SHA` | Scan version has a 12-character SHA (older examples) | Use the full SHA in the scan version |
 | `Nothing posted: No sandbox named '...'` | Scan step used another sandbox name | Use the branch name, or `--sandbox-name` |
 | `Nothing posted: Several sandboxes match '...'` | Names differ only by case | Rename/delete one, or `--sandbox-name` |
 | `scan '...' did not complete: Pre-Scan Failed` / `No Modules` | The scan failed | Fix packaging or module selection, rerun |
@@ -136,7 +148,8 @@ To post: drop `--dry-run`, set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data C
 - 1000 annotations per report (Data Center: configurable); the rest are counted.
 - SAST only.
 - Sandboxes of merged branches aren't deleted.
-- `--wait` holds the CI runner.
+- Inline mode holds the CI runner; scheduled mode posts up to one schedule interval after the scan finishes.
+- Bitbucket Pipelines schedules are hourly at most in the UI; every 20 minutes needs the API ([SETUP](docs/SETUP.md#2a-bitbucket-pipelines-cloud)).
 - One report per commit, last run wins (a branch with no new commits replaces the default branch's report on that commit).
 
 ## Files

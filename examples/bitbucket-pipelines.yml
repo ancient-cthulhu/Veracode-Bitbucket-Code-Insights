@@ -3,9 +3,13 @@
 #
 # Rename to bitbucket-pipelines.yml, or copy the steps into your own file.
 #
-#   Push to main         -> Policy Scan  -> report on the commit
+#   Push to main         -> Policy Scan
 #   Push to any branch   -> Sandbox scan (sandbox = branch name)
-#                           -> report on the commit, shown inline on its PR
+#   custom: veracode-sync -> posts every finished scan as a report on its commit.
+#                           Schedule it (docs/SETUP.md); builds don't wait for scans.
+#
+# Inline mode (report in the same build, the runner waits for the scan): add
+# "- step: *code-insights" after "- step: *scan" in both branch lists.
 #
 # Repository variables (Repository settings > Pipelines > Repository variables):
 #   VERACODE_API_ID     Veracode API ID   (Secured)
@@ -15,7 +19,7 @@
 #
 # No Bitbucket token is needed: the report step uses the Pipelines proxy.
 # If your default branch is not "main", change "main" in all three places below
-# (the scan step "if", --default-branch, and the "branches:" key).
+# (the scan step "if", the "branches:" key and --default-branch in both report steps).
 #
 # The Veracode CLI and the API wrapper are pinned to a version and
 # checked against their SHA-256, because secured variables are available to every step.
@@ -24,8 +28,7 @@
 #   latest CLI:     curl -fsS https://tools.veracode.com/veracode-cli/LATEST_VERSION
 #   latest wrapper: <release> in https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml
 #
-# After "stopped waiting" (long scan), post the results later with
-# Run pipeline > custom: veracode-report on the same commit.
+# Post one commit's results now: Run pipeline > custom: veracode-report on that commit.
 # =============================================================================
 
 image: maven:3.9-eclipse-temurin-17
@@ -45,8 +48,8 @@ definitions:
         artifacts:
           - verascan/**
 
-    # Upload and start the scan. The scan version starts with the commit SHA:
-    # the report step uses it to post results on the right commit.
+    # Upload and start the scan. The scan version is "<commit SHA>-<build number>":
+    # reports are posted on that commit.
     - step: &scan
         name: Veracode scan (policy or sandbox)
         script:
@@ -56,7 +59,7 @@ definitions:
           - echo "$WRAPPER_SHA256  /tmp/VeracodeJavaAPI.jar" | sha256sum -c -
           - |
             set -- -appname "${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}" \
-                   -version "$(echo "$BITBUCKET_COMMIT" | cut -c1-12)-${BITBUCKET_BUILD_NUMBER}" \
+                   -version "${BITBUCKET_COMMIT}-${BITBUCKET_BUILD_NUMBER}" \
                    -filepath verascan -createprofile false
             if [ "$BITBUCKET_BRANCH" = "main" ]; then
               # Never delete a policy scan still running. A merge while the previous policy
@@ -68,12 +71,21 @@ definitions:
             java -jar /tmp/VeracodeJavaAPI.jar -vid "$VERACODE_API_ID" -vkey "$VERACODE_API_KEY" \
                  -action UploadAndScan "$@"
 
-    # Wait for the results and post them as a Code Insights report.
-    # The script is downloaded from your organization's copy (docs/SETUP.md step 0),
-    # run from /tmp with "python -I" so files in the
-    # checkout cannot replace its modules. VBI_TOKEN: optional secured variable, sent as
-    # a Bearer token when your copy needs authentication.
+    # Post finished scans as Code Insights reports. The script is downloaded from your
+    # organization's copy (docs/SETUP.md step 0) and run from /tmp with "python -I" so
+    # files in the checkout cannot replace its modules. VBI_TOKEN: optional secured
+    # variable, sent as a Bearer token when your copy needs authentication.
     # No pip cache: caches are shared by all branches, so one branch could poison it.
+    - step: &code-insights-sync
+        name: Veracode Code Insights sync
+        image: python:3.12
+        script:
+          - VBI_URL="<download URL of veracode_bb_insights.py in your organization>"
+          - 'curl -fsSL ${VBI_TOKEN:+-H "Authorization: Bearer $VBI_TOKEN"} -o /tmp/vbi.py "$VBI_URL"'
+          - pip install -q "requests>=2.33,<3" "urllib3>=2.8,<3" && pip install -q --no-deps "veracode-api-signing>=24.0,<27"
+          - python -I /tmp/vbi.py --sync --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch main
+
+    # Inline: wait for this commit's scan and post it.
     - step: &code-insights
         name: Veracode Code Insights
         image: python:3.12
@@ -90,11 +102,11 @@ pipelines:
     main:
       - step: *package
       - step: *scan
-      - step: *code-insights
   default:            # every other branch (tags excluded)
     - step: *package
     - step: *scan
-    - step: *code-insights
   custom:
-    veracode-report:  # Run pipeline on a commit to post its results after "stopped waiting"
+    veracode-sync:    # schedule this one
+      - step: *code-insights-sync
+    veracode-report:  # Run pipeline on a commit to post its results now
       - step: *code-insights

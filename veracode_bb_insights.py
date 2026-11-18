@@ -228,10 +228,15 @@ def ci_commit(args, env):
         commit = first(env, COMMIT_VARS) or git(["rev-parse", "HEAD"], args.repo_dir) or ""
         if env.get("CHANGE_ID") and not env.get("BITBUCKET_COMMIT"):
             commit = jenkins_merge_parent(args.repo_dir) or commit
+    return expand_sha(commit, args.repo_dir)
+
+
+def expand_sha(commit, repo_dir):
+    """Full SHA for a short one when it names exactly one commit in the checkout."""
     commit = commit.lower()
-    if re.fullmatch(r"[0-9a-f]{7,39}", commit):      # expand a short SHA when it names exactly one commit
-        matches = (git(["rev-parse", f"--disambiguate={commit}"], args.repo_dir) or "").split()
-        commits = [m for m in matches if git(["cat-file", "-t", m], args.repo_dir) == "commit"]
+    if re.fullmatch(r"[0-9a-f]{7,39}", commit):
+        matches = (git(["rev-parse", f"--disambiguate={commit}"], repo_dir) or "").split()
+        commits = [m for m in matches if git(["cat-file", "-t", m], repo_dir) == "commit"]
         if len(commits) == 1:
             commit = commits[0].lower()
     return commit
@@ -359,8 +364,7 @@ class Veracode:
                          "or the API account cannot see it. Set VERACODE_APP_NAME.")
 
     def find_sandbox(self, app_guid, name):
-        sandboxes = list(self._pages(f"/appsec/v1/applications/{app_guid}/sandboxes", {"size": PAGE_SIZE},
-                                     "sandboxes", "Sandbox API"))
+        sandboxes = self.sandboxes(app_guid)
         exact = [s for s in sandboxes if s.get("name") == name]
         loose = [s for s in sandboxes if s.get("name", "").lower() == name.lower()]
         if exact or len(loose) == 1:
@@ -370,6 +374,10 @@ class Veracode:
                        blocking=True)
         raise Skip(f"No sandbox named '{name}'. The scan step must use the branch name as the sandbox name.",
                    blocking=True)
+
+    def sandboxes(self, app_guid):
+        return list(self._pages(f"/appsec/v1/applications/{app_guid}/sandboxes", {"size": PAGE_SIZE},
+                                "sandboxes", "Sandbox API"))
 
     def latest_build(self, app_id, sandbox_id=None):
         """getbuildinfo.do (XML API): most recent static scan, or None when there is none yet."""
@@ -395,6 +403,7 @@ class Veracode:
             "build_id": build.get("build_id", ""),
             "version": build.get("version", ""),
             "status": unit.get("status", "") if unit is not None else "",
+            "published": int(unit.get("published_date_sec", 0) or 0) if unit is not None else 0,
             "results_ready": build.get("results_ready", "").lower() == "true",
             "rules_status": build.get("rules_status", ""),
         }
@@ -474,8 +483,13 @@ class RepoFiles:
     """Maps a Veracode file path to a path in the repository by matching the
     longest common ending, e.g. com/acme/Dao.java -> src/main/java/com/acme/Dao.java."""
 
-    def __init__(self, repo_dir):
-        listing = git(["ls-files", "-z"], repo_dir, timeout=300)
+    def __init__(self, repo_dir, commit=None):
+        """Files of `commit` when the checkout has it (sync), else of the checkout."""
+        listing = None
+        if commit and git(["cat-file", "-t", commit], repo_dir) == "commit":
+            listing = git(["ls-tree", "-r", "-z", "--name-only", commit], repo_dir, timeout=300)
+        if listing is None:
+            listing = git(["ls-files", "-z"], repo_dir, timeout=300)
         if listing is None:
             log("git ls-files failed; matching file paths by walking the folder")
             files = self._walk(repo_dir)
@@ -671,6 +685,14 @@ class Bitbucket:
             raise
         return self.commit_url(commit)
 
+    def posted_scan(self, commit):
+        """Scan version shown on the commit's current report, or ''."""
+        r = self._call("GET", self.report_url(commit), "read report", ok404=True)
+        if r.status_code == 404 or not r.content:
+            return ""
+        return next((d.get("value") for d in r.json().get("data") or []
+                     if d.get("title") == "Scan" and isinstance(d.get("value"), str)), "")
+
     @classmethod
     def report_body(cls, report):
         data = [{"title": title, "type": kind,
@@ -803,6 +825,11 @@ def parse_args(argv):
     p.add_argument("--fail-build", action="store_true",
                    help="exit 2 when the report is FAILED, 3 when the scan has no usable results")
     p.add_argument("--dry-run", action="store_true", help="print the request bodies instead of posting them")
+    p.add_argument("--sync", action="store_true",
+                   help="scheduled mode: post every finished scan (policy and all sandboxes) whose commit "
+                        "has no report for it yet, without waiting")
+    p.add_argument("--max-age-days", type=int, default=14,
+                   help="--sync: ignore scans older than this (default 14)")
     return p.parse_args(argv)
 
 
@@ -828,10 +855,14 @@ def bitbucket_target(args, ctx, env):
     return bb, default_branch
 
 
+def find_app(vc, args, ctx):
+    candidates = [args.app_name] if args.app_name else [f"{ctx['owner']}/{ctx['slug']}", ctx["slug"]]
+    return vc.find_application(candidates, args.app_name or ctx["slug"])
+
+
 def find_scan(vc, args, ctx, is_branch):
     """(application, sandbox or None, build) for this commit; raises Skip."""
-    candidates = [args.app_name] if args.app_name else [f"{ctx['owner']}/{ctx['slug']}", ctx["slug"]]
-    app = vc.find_application(candidates, args.app_name or ctx["slug"])
+    app = find_app(vc, args, ctx)
     sandbox = vc.find_sandbox(app["guid"], args.sandbox_name or ctx["sandbox"]) if is_branch else None
     log(f"Veracode: application '{app['profile']['name']}', "
         f"{'sandbox ' + repr(sandbox['name']) if sandbox else 'policy scan'}")
@@ -849,8 +880,83 @@ def results_link(platform, app, build):
     return f"{platform}/auth/index.jsp#{fragment}" if fragment else platform
 
 
+def post_results(vc, bb, args, ctx, app, sandbox, build, files):
+    """Build and post (or print) the report for one finished scan. Returns the report."""
+    findings = vc.static_findings(app["guid"], sandbox["guid"] if sandbox else None)
+    policy_ids = None
+    if sandbox:
+        lowest = min((int((f.get("finding_details") or {}).get("severity", 0) or 0) for f in findings), default=0)
+        policy_ids = vc.policy_issue_ids(app["guid"], lowest) if findings else set()
+    link = results_link(vc.platform, app, build)
+    annotations = build_results(findings, policy_ids, files, link)
+    report = build_report(ctx, build, annotations, sandbox is not None, link)
+    log(f"Report: {'FAILED' if report['failed'] else 'PASSED'} - {report['details']}")
+    if args.dry_run:
+        cls = BitbucketDataCenter if ctx["server_url"] else BitbucketCloud
+        log(json.dumps({"report": cls.report_body(report),
+                        "annotations": [cls.annotation_body(a) for a in annotations[:MAX_ANNOTATIONS]]}, indent=2))
+    else:
+        where = bb.publish(ctx["commit"], report, annotations)
+        log(f"Posted {min(len(annotations), MAX_ANNOTATIONS)} annotation(s): {where}")
+    return report
+
+
+def sync_target(vc, bb, args, ctx, app, sandbox, cutoff):
+    """Post the latest scan of the policy (sandbox None) or a sandbox if it is finished and new."""
+    build = vc.latest_build(app["id"], sandbox["id"] if sandbox else None)
+    if build is None:
+        raise Skip("no scan")
+    match = SHA_IN_VERSION.match(build["version"])
+    if not match:
+        raise Skip(f"scan '{build['version']}' is not named '<commit SHA>-<build number>'")
+    state, why = build_state(build, match.group(1).lower())
+    if state != "ready":
+        raise Skip(why)
+    if build["published"] and build["published"] < cutoff:
+        raise Skip(f"scan '{build['version']}' is older than {args.max_age_days} days")
+    commit = expand_sha(match.group(1), args.repo_dir)
+    if len(commit) != 40:
+        raise Skip(f"scan '{build['version']}' has a short SHA not in this checkout; use the full SHA in the scan version")
+    if bb is not None and bb.posted_scan(commit) == build["version"]:
+        raise Skip(f"scan '{build['version']}' already posted")
+    log(f"{'sandbox ' + repr(ctx['sandbox']) if sandbox else 'policy scan'}: {why}")
+    post_results(vc, bb, args, {**ctx, "commit": commit}, app, sandbox, build, RepoFiles(args.repo_dir, commit))
+
+
+def sync(args, env):
+    """Scheduled mode: one pass over the policy scan and every sandbox, no waiting."""
+    server_url = args.server_url or env.get("BITBUCKET_URL", "")
+    server_url = require_https(server_url, "BITBUCKET_URL", strict=False) if server_url else ""
+    owner, slug = ci_repo(args, env, server_url)
+    if not (owner and slug):
+        raise SystemExit("ERROR: could not detect the repository. Pass --repo <owner>/<repo>.")
+    ctx = {"server_url": server_url, "owner": owner, "slug": slug}
+    log(f"Bitbucket: {owner}/{slug} ({'Data Center ' + server_url if server_url else 'Cloud'}), sync")
+    bb, default_branch = bitbucket_target(args, ctx, env)
+    vc = Veracode()
+    app = find_app(vc, args, ctx)
+    cutoff = time.time() - args.max_age_days * 86400
+    targets = [(None, default_branch)] + [(s, s.get("name", "")) for s in vc.sandboxes(app["guid"])]
+    errors = 0
+    for sandbox, branch in targets:
+        label = f"sandbox '{branch}'" if sandbox else "policy scan"
+        try:
+            sync_target(vc, bb, args, {**ctx, "branch": branch, "sandbox": branch}, app, sandbox, cutoff)
+        except Skip as why:
+            log(f"{label}: skipped, {why}")
+        except SystemExit as exc:          # one bad target (e.g. deleted commit) must not stop the rest
+            if "HTTP 404" in str(exc):
+                log(f"{label}: skipped, commit not found in Bitbucket (branch deleted or rewritten)")
+            else:
+                log(f"{label}: {exc}")
+                errors += 1
+    return 1 if errors else 0
+
+
 def run(args, env=None):
     env = os.environ if env is None else env
+    if args.sync:
+        return sync(args, env)
     try:
         ctx = detect_context(args, env)
         log(f"Bitbucket: {ctx['owner']}/{ctx['slug']} branch '{ctx['branch']}' commit {ctx['commit'][:12]}"
@@ -866,23 +972,7 @@ def run(args, env=None):
             return 3
         return 0
 
-    findings = vc.static_findings(app["guid"], sandbox["guid"] if sandbox else None)
-    policy_ids = None
-    if sandbox:
-        lowest = min((int((f.get("finding_details") or {}).get("severity", 0) or 0) for f in findings), default=0)
-        policy_ids = vc.policy_issue_ids(app["guid"], lowest) if findings else set()
-    link = results_link(vc.platform, app, build)
-    annotations = build_results(findings, policy_ids, RepoFiles(args.repo_dir), link)
-    report = build_report(ctx, build, annotations, is_branch, link)
-    log(f"Report: {'FAILED' if report['failed'] else 'PASSED'} - {report['details']}")
-
-    if args.dry_run:
-        cls = BitbucketDataCenter if ctx["server_url"] else BitbucketCloud
-        log(json.dumps({"report": cls.report_body(report),
-                        "annotations": [cls.annotation_body(a) for a in annotations[:MAX_ANNOTATIONS]]}, indent=2))
-    else:
-        where = bb.publish(ctx["commit"], report, annotations)
-        log(f"Posted {min(len(annotations), MAX_ANNOTATIONS)} annotation(s): {where}")
+    report = post_results(vc, bb, args, ctx, app, sandbox, build, RepoFiles(args.repo_dir))
     return 2 if args.fail_build and report["failed"] else 0
 
 

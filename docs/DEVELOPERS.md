@@ -8,7 +8,7 @@ Setup is in [SETUP.md](SETUP.md). Back to the [README](../README.md).
 - **PR reports:** **Veracode SAST (sandbox _branch_)** with PASSED/FAILED and every finding, including lines you didn't change. Cloud: **Reports** in the left sidebar or the card on the right.
 - **Commit page:** the same report.
 
-It appears when the scan finishes, some minutes after the push. Each commit has its own report.
+It appears after the scan finishes (scheduled setups: at the next sync, every 20-60 minutes). Each commit has its own report.
 
 ## Reading an annotation
 
