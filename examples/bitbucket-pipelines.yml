@@ -62,14 +62,20 @@ definitions:
                    -version "${BITBUCKET_COMMIT}-${BITBUCKET_BUILD_NUMBER}" \
                    -filepath verascan -createprofile false
             if [ "$BITBUCKET_BRANCH" = "main" ]; then
-              # Never delete a policy scan still running. A merge while the previous policy
-              # scan runs fails this step; rerun it when that scan finishes.
+              # Never delete a policy scan still running (use 2 to replace it instead).
               set -- "$@" -deleteincompletescan 1
             else
               set -- "$@" -sandboxname "$BITBUCKET_BRANCH" -createsandbox true -deleteincompletescan 2
             fi
-            java -jar /tmp/VeracodeJavaAPI.jar -vid "$VERACODE_API_ID" -vkey "$VERACODE_API_KEY" \
-                 -action UploadAndScan "$@"
+            if ! java -jar /tmp/VeracodeJavaAPI.jar -vid "$VERACODE_API_ID" -vkey "$VERACODE_API_KEY" \
+                      -action UploadAndScan "$@" > /tmp/scan.log 2>&1; then
+              cat /tmp/scan.log
+              # A previous scan of this application is still running: not an error.
+              grep -q "A scan is in progress" /tmp/scan.log || exit 1
+              echo "Not scanned: the previous scan is still running. The next push scans the latest code."
+            else
+              cat /tmp/scan.log
+            fi
 
     # Post finished scans as Code Insights reports. The script is downloaded from your
     # organization's copy (docs/SETUP.md step 0) and run from /tmp with "python -I" so
