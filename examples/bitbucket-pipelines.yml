@@ -3,23 +3,22 @@
 #
 # Rename to bitbucket-pipelines.yml, or copy the steps into your own file.
 #
-#   Push to main         -> Policy Scan
-#   Push to any branch   -> Sandbox scan (sandbox = branch name)
-#   custom: veracode-sync -> posts every finished scan as a report on its commit.
-#                           Schedule it (docs/SETUP.md); builds don't wait for scans.
+#   Push to the default branch -> Policy Scan
+#   Push to any other branch   -> Sandbox scan (sandbox = branch name)
+#   custom: veracode-sync      -> posts every finished scan as a report on its commit.
+#                                 Schedule it (docs/SETUP.md); builds don't wait for scans.
 #
 # Inline mode (report in the same build, the runner waits for the scan): add
-# "- step: *code-insights" after "- step: *scan" in both branch lists.
+# "- step: *code-insights" after "- step: *scan".
 #
 # Repository variables (Repository settings > Pipelines > Repository variables):
 #   VERACODE_API_ID     Veracode API ID   (Secured)
 #   VERACODE_API_KEY    Veracode API key  (Secured)
 #                       API account roles: Upload and Scan API + Results API
 #   VERACODE_APP_NAME   Optional. Default: <workspace>/<repo>
+#   DEFAULT_BRANCH      Optional. Branch that gets the policy scan. Default: main
 #
 # No Bitbucket token is needed: the report step uses the Pipelines proxy.
-# If your default branch is not "main", change "main" in all three places below
-# (the scan step "if", the "branches:" key and --default-branch in both report steps).
 #
 # The Veracode CLI and the API wrapper are pinned to a version and
 # checked against their SHA-256, because secured variables are available to every step.
@@ -61,7 +60,7 @@ definitions:
             set -- -appname "${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}" \
                    -version "${BITBUCKET_COMMIT}-${BITBUCKET_BUILD_NUMBER}" \
                    -filepath verascan -createprofile false
-            if [ "$BITBUCKET_BRANCH" = "main" ]; then
+            if [ "$BITBUCKET_BRANCH" = "${DEFAULT_BRANCH:-main}" ]; then
               # Never delete a policy scan still running (use 2 to replace it instead).
               set -- "$@" -deleteincompletescan 1
             else
@@ -90,7 +89,7 @@ definitions:
           - 'curl -fsSL ${VBI_TOKEN:+-H "Authorization: Bearer $VBI_TOKEN"} -o /tmp/vbi.py "$VBI_URL"'
           - 'head -n1 /tmp/vbi.py | grep -q python || { echo "VBI_URL did not return the script (a web or login page?). Use the raw file URL, see docs/SETUP.md step 0."; exit 1; }'
           - pip install -q "requests>=2.33,<3" "urllib3>=2.8,<3" && pip install -q --no-deps "veracode-api-signing>=24.0,<27"
-          - python -I /tmp/vbi.py --sync --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch main
+          - python -I /tmp/vbi.py --sync --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch "${DEFAULT_BRANCH:-main}"
 
     # Inline: wait for this commit's scan and post it.
     - step: &code-insights
@@ -103,14 +102,10 @@ definitions:
           - 'curl -fsSL ${VBI_TOKEN:+-H "Authorization: Bearer $VBI_TOKEN"} -o /tmp/vbi.py "$VBI_URL"'
           - 'head -n1 /tmp/vbi.py | grep -q python || { echo "VBI_URL did not return the script (a web or login page?). Use the raw file URL, see docs/SETUP.md step 0."; exit 1; }'
           - pip install -q "requests>=2.33,<3" "urllib3>=2.8,<3" && pip install -q --no-deps "veracode-api-signing>=24.0,<27"
-          - python -I /tmp/vbi.py --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch main --wait 60
+          - python -I /tmp/vbi.py --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch "${DEFAULT_BRANCH:-main}" --wait 60
 
 pipelines:
-  branches:
-    main:
-      - step: *package
-      - step: *scan
-  default:            # every other branch (tags excluded)
+  default:            # every branch push (tags excluded)
     - step: *package
     - step: *scan
   custom:

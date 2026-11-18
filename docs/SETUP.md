@@ -40,9 +40,9 @@ Then in the CI file (step 2) set:
 
 1. Copy [`examples/bitbucket-pipelines.yml`](../examples/bitbucket-pipelines.yml) to the repository root as `bitbucket-pipelines.yml` (or merge its steps into yours).
 2. Adapt the **Package for Veracode** step to your language (it uses a Maven/Java 17 image), or replace it with your build writing the files to scan into `verascan/` ([packaging guide](https://docs.veracode.com/r/compilation_packaging)).
-3. Default branch isn't `main`? Change `main` in the places listed at the top of the file.
+3. Default branch isn't `main`? Add the repository variable `DEFAULT_BRANCH` (step 5).
 4. **Repository settings > Pipelines > Settings**: enable Pipelines.
-5. **Repository settings > Pipelines > Repository variables**: add `VERACODE_API_ID` and `VERACODE_API_KEY` (both **Secured**), and `VERACODE_APP_NAME` if needed. No Bitbucket token is needed.
+5. **Repository settings > Pipelines > Repository variables**: add `VERACODE_API_ID` and `VERACODE_API_KEY` (both **Secured**), and `VERACODE_APP_NAME` / `DEFAULT_BRANCH` if needed. No Bitbucket token is needed.
 6. Set `VBI_URL` in `bitbucket-pipelines.yml` (step 0).
 7. Push to the default branch.
 8. Schedule the sync on the default branch:
@@ -57,7 +57,7 @@ Then in the CI file (step 2) set:
                        "selector": {"type": "custom", "pattern": "veracode-sync"}}}'
      ```
 
-   Inline mode instead: add `- step: *code-insights` after `- step: *scan` in both branch lists.
+   Inline mode instead: add `- step: *code-insights` after `- step: *scan`.
 
 ## 2b. Jenkins (Data Center or Cloud)
 
@@ -72,14 +72,13 @@ Then in the CI file (step 2) set:
    | Setting | Value |
    |---|---|
    | `BITBUCKET_URL` | Data Center URL, or `''` for Cloud |
-   | `DEFAULT_BRANCH`, `VERACODE_APP_NAME` | Your values |
+   | `defaultBranch` (top of the file), `VERACODE_APP_NAME` | Your values. The default branch gets the policy scan and runs the sync every 20 minutes |
    | `VBI_REPO` | Only when building fork PRs: `<PROJECT or workspace>/<repo>` |
    | `VBI_URL` | From step 0 |
    | `VBI_TOKEN_CREDENTIAL` | Secret text credential ID of the download token, or `''` if none |
    | `VBI_INLINE` | `'true'` to also wait and post at the end of each build; default `'false'` (sync only) |
    | `<veracode-api>`, `<bitbucket-token>` | Your credential IDs |
    | Build stage, `uploadIncludesPattern` | Your build and the files to scan |
-   | `cron(env.BRANCH_NAME == 'main' ...)` | Your default branch. The default branch job runs the sync every 20 minutes |
 6. **New Item > Multibranch Pipeline**, branch source **Bitbucket** (Data Center: add the server first under **Manage Jenkins > System > Bitbucket Endpoints**), with branch and pull request discovery.
 7. Push the Jenkinsfile to the default branch.
 
