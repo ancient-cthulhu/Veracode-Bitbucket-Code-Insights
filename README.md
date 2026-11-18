@@ -34,10 +34,10 @@ Listed: open findings that violate policy, `NEW` first, then by severity. Approv
    | **Scheduled** (default in the examples) | `--sync` every 20-60 min: for the policy scan and every sandbox, posts the latest finished scan if its commit has no report for it yet | Seconds per run |
    | **Inline** | `--wait N` after the scan step: waits for this commit's scan, then posts | Busy until the scan finishes |
 
-3. Only scans named after a commit are posted, on that commit, so lines always match.
+3. The report always shows the branch's **latest** scan, on the commit it was made from (the SHA at the start of the scan version), so lines match. A scan whose version doesn't start with a SHA is shown on the current commit with a note.
 
 - **Profile:** `VERACODE_APP_NAME`, else `<workspace or PROJECT>/<repo>`, else `<repo>` (case ignored).
-- **Branch:** the sandbox name. The policy scan is the default branch.
+- **Branch:** the sandbox is named after the branch; the default branch (`main`, or `DEFAULT_BRANCH` in the examples) gets the policy scan.
 - **File paths:** Veracode paths are matched to repository files by the longest common ending (`com/acme/Dao.java` → `src/main/java/com/acme/Dao.java`). No or ambiguous match: listed without a line.
 - **Severity:** Very High is `CRITICAL` on Cloud, `HIGH` on Data Center; High `HIGH`; Medium `MEDIUM`; lower `LOW`.
 - **Commit, branch, repository:** flags first, then CI variables (`BITBUCKET_*`, Jenkins `GIT_COMMIT`, `CHANGE_BRANCH`, `BRANCH_NAME`, `GIT_URL`), then git.
@@ -111,11 +111,11 @@ To post: drop `--dry-run`, set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data C
 
 | What you see | Why | Fix |
 |---|---|---|
-| `Nothing posted: latest scan '...' is not named after a commit` | Scan version doesn't start with the SHA | Scan version `<sha>-<build number>` |
-| `Nothing posted: latest scan '...' is for another commit` | A newer push started a newer scan | Expected |
+| `the latest scan is from commit ...; posting it there` | The branch's latest scan was made from another commit | Expected: the report goes on that commit |
+| Report says `Scan '...' doesn't start with a commit SHA` | Scan uploaded with another version name | Use the example scan step, so lines match the commit |
 | `--sync`: `skipped, ... in progress` / `already posted` / `older than 14 days` | Nothing new to post | Expected |
 | `--sync`: `skipped, commit not found in Bitbucket` | Branch deleted or rewritten | Expected |
-| `--sync`: `skipped, ... short SHA` | Scan version has a 12-character SHA (older examples) | Use the full SHA in the scan version |
+| `... names commit ..., which is not in this checkout` | Scan version has a short SHA (older examples) | Use the full SHA in the scan version (current examples) |
 | `Nothing posted: No sandbox named '...'` | Scan step used another sandbox name | Use the branch name, or `--sandbox-name` |
 | `Nothing posted: Several sandboxes match '...'` | Names differ only by case | Rename/delete one, or `--sandbox-name` |
 | `scan '...' did not complete: Pre-Scan Failed` / `No Modules` | The scan failed | Fix packaging or module selection, rerun |

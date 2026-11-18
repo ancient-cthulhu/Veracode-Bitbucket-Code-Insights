@@ -48,14 +48,16 @@ def runReport(String reportArgs) {
     }
 }
 
+def defaultBranch = 'main'              // branch that gets the policy scan and runs the sync
+
 pipeline {
     agent any
     triggers {
-        cron(env.BRANCH_NAME == 'main' ? 'H/20 * * * *' : '')   // 'main' = DEFAULT_BRANCH
+        cron(env.BRANCH_NAME == defaultBranch ? 'H/20 * * * *' : '')
     }
     environment {
         BITBUCKET_URL = ''              // Data Center: 'https://bitbucket.example.com'; '' = Bitbucket Cloud
-        DEFAULT_BRANCH = 'main'
+        DEFAULT_BRANCH = "${defaultBranch}"
         VERACODE_APP_NAME = '<Veracode application profile name>'
         VBI_REPO = ''                   // '<workspace or PROJECT>/<repo>' when fork PRs are built: their GIT_URL can point at the fork
         VBI_URL = '<download URL of veracode_bb_insights.py in your organization>'   // docs/SETUP.md step 0

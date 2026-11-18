@@ -12,9 +12,10 @@ Code Insights report, with inline annotations on the scanned commit.
 Runs as a CI step (Bitbucket Pipelines or Jenkins) after the Veracode scan.
 Works with Bitbucket Cloud (default) and Bitbucket Data Center (set BITBUCKET_URL).
 
-The scan step must name the scan version "<commit SHA>-<anything>", for example
-"1a2b3c4d5e6f-87". Results are only posted when the latest scan was made from
-this commit, so annotations never point at the wrong lines.
+Takes the latest scan of the branch (the sandbox named after it, or the policy scan on
+the default branch) and posts it on the commit it was made from: the scan version starts
+with that commit's SHA, e.g. "<full SHA>-87". Scans not named that way are shown on the
+current commit, with a note.
 
 Errors: configuration and API problems exit 1 with a one-line "ERROR: ..." message.
 Skip means there is nothing to post for this commit (exit 0, or 3 with --fail-build
@@ -437,18 +438,10 @@ class Veracode:
                 self._pages(f"/appsec/v2/applications/{app_guid}/findings", params, "findings", "Findings API")}
 
 
-def build_state(build, commit):
-    """('ready' | 'wait' | 'skip' | 'fail', reason) for the latest scan.
-    skip = superseded by another commit; fail = this commit's scan has no usable results."""
+def build_state(build):
+    """('ready' | 'wait' | 'fail', reason) for the latest scan of a branch."""
     if build is None:
         return "wait", "no scan found yet"
-    match = SHA_IN_VERSION.match(build["version"])
-    if not match:
-        return "fail", (f"latest scan '{build['version']}' is not named after a commit. "
-                        "Name the scan version '<commit SHA>-<build number>'.")
-    if not commit.startswith(match.group(1).lower()):
-        return "skip", (f"latest scan '{build['version']}' is for another commit "
-                        "(or is not named '<commit SHA>-<build number>')")
     if not build["results_ready"]:
         if any(w in build["status"].lower() for w in SCAN_FAILED_WORDS):
             return "fail", f"scan '{build['version']}' did not complete: {build['status']}"
@@ -459,16 +452,32 @@ def build_state(build, commit):
     return "ready", f"scan '{build['version']}' is ready"
 
 
-def wait_for_build(vc, app_id, sandbox_id, commit, wait_minutes):
+def scan_commit(build, repo_dir, known=""):
+    """Commit a scan was made from: the full SHA at the start of its scan version, or ''
+    when the version doesn't start with a SHA. `known` is a full SHA it may abbreviate."""
+    match = SHA_IN_VERSION.match(build["version"])
+    if not match:
+        return ""
+    prefix = match.group(1).lower()
+    if known and known.startswith(prefix):
+        return known
+    sha = expand_sha(prefix, repo_dir)
+    if len(sha) != 40:
+        raise Skip(f"scan '{build['version']}' names commit {prefix}, which is not in this checkout. "
+                   "Put the full commit SHA in the scan version.")
+    return sha
+
+
+def wait_for_build(vc, app_id, sandbox_id, wait_minutes):
     deadline = time.monotonic() + wait_minutes * 60
     while True:
         build = vc.latest_build(app_id, sandbox_id)
-        state, why = build_state(build, commit)
+        state, why = build_state(build)
         if state == "ready":
             log(f"Veracode: {why}")
             return build
-        if state in ("skip", "fail"):
-            raise Skip(why, blocking=state == "fail")
+        if state == "fail":
+            raise Skip(why, blocking=True)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise Skip(f"{why} (stopped waiting after {wait_minutes} min)", blocking=True)
@@ -626,6 +635,8 @@ def build_report(ctx, build, annotations, is_branch, link):
         failed = total > 0
         lines = [f"{total} finding(s) violate the Veracode policy."]
         title = "Veracode SAST (policy scan)"
+    if ctx.get("note"):
+        lines.insert(0, ctx["note"])
     if total:
         lines.append("Pull requests show annotations only on changed lines; this report lists them all.")
     if overdue:
@@ -866,7 +877,7 @@ def find_scan(vc, args, ctx, is_branch):
     sandbox = vc.find_sandbox(app["guid"], args.sandbox_name or ctx["sandbox"]) if is_branch else None
     log(f"Veracode: application '{app['profile']['name']}', "
         f"{'sandbox ' + repr(sandbox['name']) if sandbox else 'policy scan'}")
-    build = wait_for_build(vc, app["id"], sandbox["id"] if sandbox else None, ctx["commit"], args.wait)
+    build = wait_for_build(vc, app["id"], sandbox["id"] if sandbox else None, args.wait)
     return app, sandbox, build
 
 
@@ -906,21 +917,29 @@ def sync_target(vc, bb, args, ctx, app, sandbox, cutoff):
     build = vc.latest_build(app["id"], sandbox["id"] if sandbox else None)
     if build is None:
         raise Skip("no scan")
-    match = SHA_IN_VERSION.match(build["version"])
-    if not match:
-        raise Skip(f"scan '{build['version']}' is not named '<commit SHA>-<build number>'")
-    state, why = build_state(build, match.group(1).lower())
+    state, why = build_state(build)
     if state != "ready":
         raise Skip(why)
     if build["published"] and build["published"] < cutoff:
         raise Skip(f"scan '{build['version']}' is older than {args.max_age_days} days")
-    commit = expand_sha(match.group(1), args.repo_dir)
-    if len(commit) != 40:
-        raise Skip(f"scan '{build['version']}' has a short SHA not in this checkout; use the full SHA in the scan version")
+    commit, note = scan_commit(build, args.repo_dir), ""
+    if not commit:
+        if sandbox:
+            raise Skip(f"scan '{build['version']}' doesn't start with a commit SHA, so its commit is unknown")
+        commit = git(["rev-parse", "HEAD"], args.repo_dir) or ""     # the sync runs on the default branch
+        if len(commit) != 40:
+            raise Skip(f"scan '{build['version']}' doesn't start with a commit SHA and the checkout has no HEAD")
+        note = unnamed_note(build)
     if bb is not None and bb.posted_scan(commit) == build["version"]:
         raise Skip(f"scan '{build['version']}' already posted")
     log(f"{'sandbox ' + repr(ctx['sandbox']) if sandbox else 'policy scan'}: {why}")
-    post_results(vc, bb, args, {**ctx, "commit": commit}, app, sandbox, build, RepoFiles(args.repo_dir, commit))
+    post_results(vc, bb, args, {**ctx, "commit": commit, "note": note}, app, sandbox, build,
+                 RepoFiles(args.repo_dir, commit))
+
+
+def unnamed_note(build):
+    return (f"Scan '{build['version']}' doesn't start with a commit SHA, so it is shown on the latest "
+            "commit; line numbers may be off if the code changed since the scan.")
 
 
 def sync(args, env):
@@ -965,6 +984,7 @@ def run(args, env=None):
         is_branch = ctx["pr_build"] or ctx["branch"] != default_branch
         vc = Veracode()
         app, sandbox, build = find_scan(vc, args, ctx, is_branch)
+        target = scan_commit(build, args.repo_dir, ctx["commit"])
     except Skip as why:
         log(f"Nothing posted: {why}")
         if why.blocking and args.fail_build:
@@ -972,7 +992,12 @@ def run(args, env=None):
             return 3
         return 0
 
-    report = post_results(vc, bb, args, ctx, app, sandbox, build, RepoFiles(args.repo_dir))
+    if not target:
+        ctx = {**ctx, "note": unnamed_note(build)}
+    elif target != ctx["commit"]:
+        log(f"Veracode: the latest scan is from commit {target[:12]}; posting it there.")
+        ctx = {**ctx, "commit": target}
+    report = post_results(vc, bb, args, ctx, app, sandbox, build, RepoFiles(args.repo_dir, ctx["commit"]))
     return 2 if args.fail_build and report["failed"] else 0
 
 
