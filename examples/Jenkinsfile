@@ -25,8 +25,9 @@ pipeline {
         DEFAULT_BRANCH = 'main'
         VERACODE_APP_NAME = '<Veracode application profile name>'
         VBI_REPO = ''                   // '<workspace or PROJECT>/<repo>' when fork PRs are built: their GIT_URL can point at the fork
-        VBI_REF = 'v1.0.0'              // release tag (or a full commit SHA) of the report script
+        VBI_URL = '<download URL of veracode_bb_insights.py in your organization>'   // docs/SETUP.md step 0
         VBI_SHA256 = 'c5a275d6ae6b6b45f6e0d61e1c27b18ccd8b5b6854727e57929dc58f1352b616'
+        VBI_TOKEN_CREDENTIAL = ''       // Secret text credential ID if VBI_URL needs a token (sent as Bearer); '' = none
     }
     stages {
         // Runs before any code from the branch or PR, so build steps cannot change
@@ -86,27 +87,33 @@ pipeline {
         stage('Veracode Code Insights') {
             when { not { buildingTag() } }
             steps {
-                withCredentials([usernamePassword(credentialsId: '<veracode-api>',
+                script {
+                    def creds = [usernamePassword(credentialsId: '<veracode-api>',
                                                   usernameVariable: 'VERACODE_API_ID',
                                                   passwordVariable: 'VERACODE_API_KEY'),
-                                 string(credentialsId: '<bitbucket-token>', variable: 'BITBUCKET_TOKEN')]) {
-                    // A fresh folder outside the checkout, a new venv each run, pip --isolated and
-                    // "python -I": files in the checkout and earlier build steps cannot swap the
-                    // script, its modules or its package index while secrets are loaded.
-                    // Internal PyPI mirror: add --index-url https://<mirror>/simple (--isolated
-                    // ignores pip.conf). Untrusted fork PRs still run their own build code on this
-                    // agent: build them on a fresh agent or container if they can reach these credentials.
-                    sh '''
-                        T=$(mktemp -d)
-                        trap 'rm -rf "$T"' EXIT
-                        curl -fsSLo "$T/vbi.py" "https://raw.githubusercontent.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights/$VBI_REF/veracode_bb_insights.py"
-                        echo "$VBI_SHA256  $T/vbi.py" | sha256sum -c -
-                        python3 -m venv "$T/venv"
-                        "$T/venv/bin/python" -m pip install --isolated -q "requests>=2.33,<3" "urllib3>=2.8,<3"
-                        "$T/venv/bin/python" -m pip install --isolated -q --no-deps "veracode-api-signing>=24.0,<27"
-                        "$T/venv/bin/python" -I "$T/vbi.py" --commit "$VBI_COMMIT" --repo-dir "$WORKSPACE" \
-                            ${VBI_REPO:+--repo "$VBI_REPO"} --default-branch "$DEFAULT_BRANCH" --wait 60
-                    '''
+                                 string(credentialsId: '<bitbucket-token>', variable: 'BITBUCKET_TOKEN')]
+                    if (env.VBI_TOKEN_CREDENTIAL) {
+                        creds << string(credentialsId: env.VBI_TOKEN_CREDENTIAL, variable: 'VBI_TOKEN')
+                    }
+                    withCredentials(creds) {
+                        // A fresh folder outside the checkout, a new venv each run, pip --isolated and
+                        // "python -I": files in the checkout and earlier build steps cannot swap the
+                        // script, its modules or its package index while secrets are loaded.
+                        // Internal PyPI mirror: add --index-url https://<mirror>/simple (--isolated
+                        // ignores pip.conf). Untrusted fork PRs still run their own build code on this
+                        // agent: build them on a fresh agent or container if they can reach these credentials.
+                        sh '''
+                            T=$(mktemp -d)
+                            trap 'rm -rf "$T"' EXIT
+                            curl -fsSL ${VBI_TOKEN:+-H "Authorization: Bearer $VBI_TOKEN"} -o "$T/vbi.py" "$VBI_URL"
+                            echo "$VBI_SHA256  $T/vbi.py" | sha256sum -c -
+                            python3 -m venv "$T/venv"
+                            "$T/venv/bin/python" -m pip install --isolated -q "requests>=2.33,<3" "urllib3>=2.8,<3"
+                            "$T/venv/bin/python" -m pip install --isolated -q --no-deps "veracode-api-signing>=24.0,<27"
+                            "$T/venv/bin/python" -I "$T/vbi.py" --commit "$VBI_COMMIT" --repo-dir "$WORKSPACE" \
+                                ${VBI_REPO:+--repo "$VBI_REPO"} --default-branch "$DEFAULT_BRANCH" --wait 60
+                        '''
+                    }
                 }
             }
         }
