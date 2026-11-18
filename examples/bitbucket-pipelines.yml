@@ -17,7 +17,7 @@
 # If your default branch is not "main", change "main" in all three places below
 # (the scan step "if", --default-branch, and the "branches:" key).
 #
-# The report script, the Veracode CLI and the API wrapper are pinned to a version and
+# The Veracode CLI and the API wrapper are pinned to a version and
 # checked against their SHA-256, because secured variables are available to every step.
 # Python packages are capped at the next major version (not hash-pinned). To upgrade a tool, change the
 # version and its checksum together (sha256sum of the downloaded file):
@@ -70,7 +70,7 @@ definitions:
 
     # Wait for the results and post them as a Code Insights report.
     # The script is downloaded from your organization's copy (docs/SETUP.md step 0),
-    # checked against its SHA-256, and run from /tmp with "python -I" so files in the
+    # run from /tmp with "python -I" so files in the
     # checkout cannot replace its modules. VBI_TOKEN: optional secured variable, sent as
     # a Bearer token when your copy needs authentication.
     # No pip cache: caches are shared by all branches, so one branch could poison it.
@@ -81,9 +81,7 @@ definitions:
           download: false             # only the git checkout is needed, not verascan/
         script:
           - VBI_URL="<download URL of veracode_bb_insights.py in your organization>"
-          - VBI_SHA256=c5a275d6ae6b6b45f6e0d61e1c27b18ccd8b5b6854727e57929dc58f1352b616
           - curl -fsSL ${VBI_TOKEN:+-H "Authorization: Bearer $VBI_TOKEN"} -o /tmp/vbi.py "$VBI_URL"
-          - echo "$VBI_SHA256  /tmp/vbi.py" | sha256sum -c -
           - pip install -q "requests>=2.33,<3" "urllib3>=2.8,<3" && pip install -q --no-deps "veracode-api-signing>=24.0,<27"
           - python -I /tmp/vbi.py --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch main --wait 60
 
