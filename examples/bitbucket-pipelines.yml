@@ -81,7 +81,7 @@ definitions:
           download: false             # only the git checkout is needed, not verascan/
         script:
           - VBI_URL="<download URL of veracode_bb_insights.py in your organization>"
-          - curl -fsSL ${VBI_TOKEN:+-H "Authorization: Bearer $VBI_TOKEN"} -o /tmp/vbi.py "$VBI_URL"
+          - 'curl -fsSL ${VBI_TOKEN:+-H "Authorization: Bearer $VBI_TOKEN"} -o /tmp/vbi.py "$VBI_URL"'
           - pip install -q "requests>=2.33,<3" "urllib3>=2.8,<3" && pip install -q --no-deps "veracode-api-signing>=24.0,<27"
           - python -I /tmp/vbi.py --repo-dir "$BITBUCKET_CLONE_DIR" --default-branch main --wait 60
 
