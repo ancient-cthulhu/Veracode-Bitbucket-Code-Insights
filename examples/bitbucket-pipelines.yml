@@ -79,7 +79,7 @@ definitions:
           download: false             # only the git checkout is needed, not verascan/
         script:
           - VBI_REF=v1.0.0
-          - VBI_SHA256=d864a4ab0ec82d6277d04ec01094c29e800a7eb958309e659733a03377dbeffd
+          - VBI_SHA256=c5a275d6ae6b6b45f6e0d61e1c27b18ccd8b5b6854727e57929dc58f1352b616
           - curl -fsSLo /tmp/vbi.py "https://raw.githubusercontent.com/ancient-cthulhu/Veracode-Bitbucket-Code-Insights/$VBI_REF/veracode_bb_insights.py"
           - echo "$VBI_SHA256  /tmp/vbi.py" | sha256sum -c -
           - pip install -q "requests>=2.33,<3" "urllib3>=2.8,<3" && pip install -q --no-deps "veracode-api-signing>=24.0,<27"

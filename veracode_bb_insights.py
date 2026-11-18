@@ -20,7 +20,7 @@ Errors: configuration and API problems exit 1 with a one-line "ERROR: ..." messa
 Skip means there is nothing to post for this commit (exit 0, or 3 with --fail-build
 when the scan itself has no usable results).
 
-Requirements: Python 3.10+, pip install -r requirements.txt
+Requirements: Python 3.10+, pip install --no-deps -r requirements.txt
 """
 
 import argparse
@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
@@ -64,6 +65,8 @@ NO_BUILD_ERROR = re.compile(r"\b(no|not find|cannot find|could not find|does not
 SEVERITY_NAMES = {5: "Very High", 4: "High", 3: "Medium", 2: "Low", 1: "Very Low", 0: "Info"}
 CLOUD_SEVERITY = {5: "CRITICAL", 4: "HIGH", 3: "MEDIUM"}   # anything lower -> LOW
 DC_SEVERITY = {5: "HIGH", 4: "HIGH", 3: "MEDIUM"}          # Data Center has no CRITICAL
+MITIGATION_NOTES = {"PROPOSED": "Mitigation proposed in Veracode, waiting for approval.",
+                    "REJECTED": "Mitigation rejected in Veracode: fix the code or propose a new mitigation."}
 
 PLATFORM_HOSTS = {
     "global": ("https://api.veracode.com", "https://analysiscenter.veracode.com"),
@@ -397,8 +400,10 @@ class Veracode:
         }
 
     def static_findings(self, app_guid, sandbox_guid=None):
-        """Open static findings that violate policy, without approved mitigations."""
-        params = {"scan_type": "STATIC", "violates_policy": "TRUE", "size": FINDINGS_PAGE_SIZE}
+        """Open static findings that violate policy, without approved mitigations,
+        with the policy grace period (fix-by date)."""
+        params = {"scan_type": "STATIC", "violates_policy": "TRUE", "include_exp_date": "TRUE",
+                  "size": FINDINGS_PAGE_SIZE}
         if sandbox_guid:
             params["context"] = sandbox_guid
         out = []
@@ -534,9 +539,15 @@ def plain_text(description, limit=1200):
     return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
 
 
-def to_annotation(finding, files, is_new, link):
+def fix_by(finding):
+    """Policy grace period end as YYYY-MM-DD, or ''."""
+    value = finding.get("grace_period_expires_date") or ""
+    return value[:10] if re.match(r"\d{4}-\d{2}-\d{2}", value) else ""
+
+
+def to_annotation(finding, files, is_new, link, today=None):
     """Platform-neutral annotation: external_id, severity (0-5), new, path, line,
-    summary, details, link."""
+    summary, details, link, overdue."""
     d = finding.get("finding_details") or {}
     severity = int(d.get("severity", 0) or 0)
     cwe = d.get("cwe") or {}
@@ -554,11 +565,20 @@ def to_annotation(finding, files, is_new, link):
     if path is None:
         where = "/".join(x for x in (d.get("module"), vc_path) if x)
         details.append(f"Veracode location: {where}{f':{line}' if line else ''}")
+    due = fix_by(finding)
+    today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    overdue = bool(due) and due < today
+    if due:
+        details.append(f"Fix by {due} (policy grace period){', overdue' if overdue else ''}")
+    mitigation = MITIGATION_NOTES.get(((finding.get("finding_status") or {}).get("resolution_status") or "").upper())
+    if mitigation:
+        details.append(mitigation)
     details.append(f"Veracode issue ID: {finding.get('issue_id')}")
     return {
         "external_id": f"veracode-{finding.get('issue_id')}",
         "severity": severity,
         "new": is_new,
+        "overdue": overdue,
         "path": path,
         "line": line if path else None,
         "summary": summary[:MAX_TITLE],
@@ -580,6 +600,7 @@ def build_report(ctx, build, annotations, is_branch, link):
     total = len(annotations)
     new = sum(a["new"] for a in annotations)
     unmapped = sum(a["path"] is None for a in annotations)
+    overdue = sum(a.get("overdue", False) for a in annotations)
     omitted = max(0, total - MAX_ANNOTATIONS)
 
     if is_branch:
@@ -593,6 +614,8 @@ def build_report(ctx, build, annotations, is_branch, link):
         title = "Veracode SAST (policy scan)"
     if total:
         lines.append("Pull requests show annotations only on changed lines; this report lists them all.")
+    if overdue:
+        lines.append(f"{overdue} finding(s) are past their policy fix-by date.")
     if unmapped:
         lines.append(f"{unmapped} finding(s) could not be matched to a file in the repository.")
     if omitted:
