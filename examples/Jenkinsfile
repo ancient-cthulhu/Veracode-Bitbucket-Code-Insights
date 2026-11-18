@@ -1,11 +1,10 @@
 // Veracode SAST + Bitbucket Code Insights (Jenkins multibranch pipeline)
 // Works with Bitbucket Data Center and Bitbucket Cloud.
 //
-//   Default branch   -> Policy Scan
-//   Other branches   -> Sandbox scan (sandbox = branch name)
-//   Fork PRs         -> Sandbox scan named PR-<n> (fork branch names can clash)
-//   Pull requests    -> always a sandbox scan, never the policy scan
-//   Tags             -> not scanned
+//   Push or merge to the default branch -> Policy Scan
+//   Pull request into the default branch -> Sandbox scan (sandbox = source branch name;
+//                                           fork PRs: PR-<n>, fork branch names can clash)
+//   Other branches, PRs, tags           -> built, not scanned
 //
 // Reports are posted by a scheduled sync (every 20 minutes, from the default branch job),
 // so builds don't wait for scans. VBI_INLINE = 'true' also posts at the end of each build.
@@ -50,6 +49,11 @@ def runReport(String reportArgs) {
 
 def defaultBranch = 'main'              // branch that gets the policy scan and runs the sync
 
+// Scan the default branch and pull requests into it.
+def scanned() {
+    return env.CHANGE_ID ? env.CHANGE_TARGET == env.DEFAULT_BRANCH : env.BRANCH_NAME == env.DEFAULT_BRANCH
+}
+
 pipeline {
     agent any
     triggers {
@@ -79,6 +83,7 @@ pipeline {
                 allOf {
                     not { buildingTag() }
                     not { triggeredBy 'TimerTrigger' }
+                    expression { scanned() }
                 }
             }
             steps {
@@ -108,6 +113,7 @@ pipeline {
                 allOf {
                     not { buildingTag() }
                     not { triggeredBy 'TimerTrigger' }
+                    expression { scanned() }
                 }
             }
             steps {
@@ -143,6 +149,7 @@ pipeline {
                 allOf {
                     not { buildingTag() }
                     not { triggeredBy 'TimerTrigger' }
+                    expression { scanned() }
                     environment name: 'VBI_INLINE', value: 'true'
                 }
             }

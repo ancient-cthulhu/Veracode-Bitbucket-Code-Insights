@@ -40,7 +40,7 @@ Then in the CI file (step 2) set:
 
 1. Copy [`examples/bitbucket-pipelines.yml`](../examples/bitbucket-pipelines.yml) to the repository root as `bitbucket-pipelines.yml` (or merge its steps into yours).
 2. Adapt the **Package for Veracode** step to your language (it uses a Maven/Java 17 image), or replace it with your build writing the files to scan into `verascan/` ([packaging guide](https://docs.veracode.com/r/compilation_packaging)).
-3. Default branch isn't `main`? Add the repository variable `DEFAULT_BRANCH` (step 5).
+3. Default branch isn't `main`? Change `main` in the two `triggers` at the end of the file and add the repository variable `DEFAULT_BRANCH` (step 5).
 4. **Repository settings > Pipelines > Settings**: enable Pipelines.
 5. **Repository settings > Pipelines > Repository variables**: add `VERACODE_API_ID` and `VERACODE_API_KEY` (both **Secured**), and `VERACODE_APP_NAME` / `DEFAULT_BRANCH` if needed. No Bitbucket token is needed.
 6. Set `VBI_URL` in `bitbucket-pipelines.yml` (step 0).
