@@ -587,6 +587,22 @@ def description_parts(description):
     return plain_text(description), ""
 
 
+def _sentences(text):
+    return [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s]
+
+
+def first_sentences(text, n):
+    return " ".join(_sentences(text)[:n])
+
+
+def key_sentences(issue):
+    """First sentence (what is wrong) plus the finding-specific ones (which argument,
+    variable and source), without Veracode's generic explanation."""
+    sentences = _sentences(issue)
+    specific = [s for s in sentences[1:] if re.search(r"tainted|argument|originated", s, re.I)]
+    return " ".join(sentences[:1] + specific) if specific else first_sentences(issue, 2)
+
+
 def fix_by(finding):
     """Policy grace period end as YYYY-MM-DD, or ''."""
     value = finding.get("grace_period_expires_date") or ""
@@ -610,37 +626,41 @@ def to_annotation(finding, files, is_new, link, today=None):
     status = finding.get("finding_status") or {}
     exploit = EXPLOITABILITY.get(str(d.get("exploitability", "")), "")
     issue, fix = description_parts(finding.get("description", ""))
-    rating = f"{SEVERITY_NAMES.get(severity, severity)} severity" + (f", exploit {exploit}" if exploit else "")
-    details = [f"{rating}. CWE-{cwe.get('id', '?')}{': ' + cwe['name'] if cwe.get('name') else ''}.", issue]
-    if fix:
-        details.append(f"How to fix: {fix}")
-    if procedure:
-        details.append(f"Function: {procedure}")
-    sink = d.get("attack_vector") or ""
-    if sink and sink != procedure:
-        details.append(f"Vulnerable call: {sink}")
-    if path is None:
-        where = "/".join(x for x in (d.get("module"), vc_path) if x)
-        details.append(f"Veracode location: {where}{f':{line}' if line else ''}")
     due = fix_by(finding)
     today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     overdue = bool(due) and due < today
-    dates = []
-    found = status.get("first_found_date") or ""
-    if re.match(r"\d{4}-\d{2}-\d{2}", found):
-        dates.append(f"{'Reopened, first' if str(status.get('status', '')).upper() == 'REOPENED' else 'First'} "
-                     f"found {found[:10]}")
+
+    # Bitbucket Cloud shows details as one paragraph: short labeled parts between markers.
+    head = [f"{SEVERITY_NAMES.get(severity, severity)} severity"]
+    if exploit:
+        head.append(f"exploit {exploit}")
     if due:
-        dates.append(f"Fix by {due} (policy grace period){', overdue' if overdue else ''}")
-    if dates:
-        details.append(". ".join(dates))
+        head.append(f"OVERDUE (fix by {due})" if overdue else f"fix by {due}")
+    parts = [" · ".join(head)]
+    if issue:
+        parts.append(f"Problem: {key_sentences(issue)}")
+    if fix:
+        parts.append(f"Fix: {first_sentences(fix, 2)}")
+    sink = d.get("attack_vector") or ""
+    if procedure:
+        parts.append(f"Where: {function}" + (f" calls {sink}" if sink and sink != procedure else ""))
+    elif sink:
+        parts.append(f"Where: calls {sink}")
+    if path is None:
+        where = "/".join(x for x in (d.get("module"), vc_path) if x)
+        parts.append(f"Veracode location: {where}{f':{line}' if line else ''}")
     mitigation = MITIGATION_NOTES.get((status.get("resolution_status") or "").upper())
     if mitigation:
-        details.append(mitigation)
-    ref = f"Veracode issue ID: {finding.get('issue_id')}"
+        parts.append(mitigation)
+    ref = [f"Veracode issue {finding.get('issue_id')}"]
+    found = status.get("first_found_date") or ""
+    if re.match(r"\d{4}-\d{2}-\d{2}", found):
+        reopened = str(status.get("status", "")).upper() == "REOPENED"
+        ref.append(f"{'reopened, first' if reopened else 'first'} found {found[:10]}")
     if str(cwe.get("id", "")).isdigit():
-        ref += f". CWE: https://cwe.mitre.org/data/definitions/{cwe['id']}.html"
-    details.append(ref)
+        ref.append(f"CWE-{cwe['id']}: https://cwe.mitre.org/data/definitions/{cwe['id']}.html")
+    parts.append(" · ".join(ref))
+    details = [" ▸ ".join(parts)]
     return {
         "external_id": f"veracode-{finding.get('issue_id')}",
         "severity": severity,
