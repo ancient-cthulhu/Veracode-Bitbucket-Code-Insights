@@ -63,6 +63,7 @@ SCAN_FAILED_WORDS = ("failed", "error", "cancel", "no modules")
 # getbuildinfo.do <error> texts that only mean "no scan yet" (wording: verify)
 NO_BUILD_ERROR = re.compile(r"\b(no|not find|cannot find|could not find|does not have any)\b.*\bbuilds?\b", re.I)
 
+EXPLOITABILITY = {"-2": "very unlikely", "-1": "unlikely", "0": "neutral", "1": "likely", "2": "very likely"}
 SEVERITY_NAMES = {5: "Very High", 4: "High", 3: "Medium", 2: "Low", 1: "Very Low", 0: "Info"}
 CLOUD_SEVERITY = {5: "CRITICAL", 4: "HIGH", 3: "MEDIUM"}   # anything lower -> LOW
 DC_SEVERITY = {5: "HIGH", 4: "HIGH", 3: "MEDIUM"}          # Data Center has no CRITICAL
@@ -576,6 +577,16 @@ def plain_text(description, limit=1200):
     return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
 
 
+def description_parts(description):
+    """(issue, fix) from a Veracode description: its first two <span> blocks, without the
+    references. Other layouts: (whole text, '')."""
+    blocks = [plain_text(b, 700) for b in re.findall(r"<span>(.*?)</span>", description or "", re.S | re.I)]
+    blocks = [b for b in blocks if b and not b.startswith("References")]
+    if len(blocks) >= 2:
+        return blocks[0], blocks[1]
+    return plain_text(description), ""
+
+
 def fix_by(finding):
     """Policy grace period end as YYYY-MM-DD, or ''."""
     value = finding.get("grace_period_expires_date") or ""
@@ -593,24 +604,43 @@ def to_annotation(finding, files, is_new, link, today=None):
     path = files.resolve(vc_path)
     line = d.get("file_line_number") or None
 
-    summary = f"{SEVERITY_NAMES.get(severity, severity)} | CWE-{cwe.get('id', '?')} {category}"
-    if is_new:
-        summary = "NEW | " + summary
-    details = [plain_text(finding.get("description", ""))]
-    if d.get("procedure"):
-        details.append(f"Function: {d['procedure']}")
+    procedure = d.get("procedure") or ""
+    function = ".".join(procedure.split(".")[-2:])
+    summary = f"{'NEW: ' if is_new else ''}{category} (CWE-{cwe.get('id', '?')}){' in ' + function if function else ''}"
+    status = finding.get("finding_status") or {}
+    exploit = EXPLOITABILITY.get(str(d.get("exploitability", "")), "")
+    issue, fix = description_parts(finding.get("description", ""))
+    rating = f"{SEVERITY_NAMES.get(severity, severity)} severity" + (f", exploit {exploit}" if exploit else "")
+    details = [f"{rating}. CWE-{cwe.get('id', '?')}{': ' + cwe['name'] if cwe.get('name') else ''}.", issue]
+    if fix:
+        details.append(f"How to fix: {fix}")
+    if procedure:
+        details.append(f"Function: {procedure}")
+    sink = d.get("attack_vector") or ""
+    if sink and sink != procedure:
+        details.append(f"Vulnerable call: {sink}")
     if path is None:
         where = "/".join(x for x in (d.get("module"), vc_path) if x)
         details.append(f"Veracode location: {where}{f':{line}' if line else ''}")
     due = fix_by(finding)
     today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     overdue = bool(due) and due < today
+    dates = []
+    found = status.get("first_found_date") or ""
+    if re.match(r"\d{4}-\d{2}-\d{2}", found):
+        dates.append(f"{'Reopened, first' if str(status.get('status', '')).upper() == 'REOPENED' else 'First'} "
+                     f"found {found[:10]}")
     if due:
-        details.append(f"Fix by {due} (policy grace period){', overdue' if overdue else ''}")
-    mitigation = MITIGATION_NOTES.get(((finding.get("finding_status") or {}).get("resolution_status") or "").upper())
+        dates.append(f"Fix by {due} (policy grace period){', overdue' if overdue else ''}")
+    if dates:
+        details.append(". ".join(dates))
+    mitigation = MITIGATION_NOTES.get((status.get("resolution_status") or "").upper())
     if mitigation:
         details.append(mitigation)
-    details.append(f"Veracode issue ID: {finding.get('issue_id')}")
+    ref = f"Veracode issue ID: {finding.get('issue_id')}"
+    if str(cwe.get("id", "")).isdigit():
+        ref += f". CWE: https://cwe.mitre.org/data/definitions/{cwe['id']}.html"
+    details.append(ref)
     return {
         "external_id": f"veracode-{finding.get('issue_id')}",
         "severity": severity,
@@ -618,6 +648,8 @@ def to_annotation(finding, files, is_new, link, today=None):
         "overdue": overdue,
         "path": path,
         "line": line if path else None,
+        "exploit": int(d.get("exploitability") or 0) if str(d.get("exploitability", "")).lstrip("-").isdigit() else 0,
+        "category": category,
         "summary": summary[:MAX_TITLE],
         "details": "\n".join(x for x in details if x),
         "link": link,
@@ -628,31 +660,44 @@ def build_results(findings, policy_ids, files, link):
     """policy_ids is None on the default branch, else the issue IDs in the policy scan."""
     annotations = [to_annotation(f, files, policy_ids is not None and f.get("issue_id") not in policy_ids, link)
                    for f in findings]
-    annotations.sort(key=lambda a: (not a["new"], -a["severity"], a["path"] is None, a["path"] or "", a["line"] or 0))
+    annotations.sort(key=lambda a: (not a["new"], -a["severity"], -a.get("exploit", 0), a["path"] is None,
+                                    a["path"] or "", a["line"] or 0))
     return annotations
 
 
 def build_report(ctx, build, annotations, is_branch, link):
-    """Platform-neutral report; data is a list of (title, TYPE, value), at most 6 items."""
+    """Platform-neutral report; data is a list of (title, TYPE, value, priority)."""
     total = len(annotations)
     new = sum(a["new"] for a in annotations)
     unmapped = sum(a["path"] is None for a in annotations)
     overdue = sum(a.get("overdue", False) for a in annotations)
     omitted = max(0, total - MAX_ANNOTATIONS)
 
+    counts = {name: sum(SEVERITY_NAMES.get(a["severity"]) == name for a in annotations)
+              for name in ("Very High", "High", "Medium")}
+    counts["Low"] = total - sum(counts.values())
+    by_severity = ", ".join(f"{n} {name}" for name, n in counts.items() if n)
+
     if is_branch:
         failed = new > 0
-        lines = [f"{new} finding(s) new in this branch violate the Veracode policy "
-                 f"({total} in total, {total - new} already in the policy scan)."]
+        lines = [f"{new} new finding(s) in this branch violate the Veracode policy"
+                 f" ({total} in total, {total - new} already in the policy scan)."]
         title = f"Veracode SAST (sandbox {ctx.get('sandbox', ctx['branch'])})"
     else:
         failed = total > 0
         lines = [f"{total} finding(s) violate the Veracode policy."]
         title = "Veracode SAST (policy scan)"
+    if by_severity:
+        lines.append(f"By severity: {by_severity}.")
+    categories = {}
+    for a in annotations:
+        if a.get("category"):
+            categories[a["category"]] = categories.get(a["category"], 0) + 1
+    if categories:
+        top = sorted(categories.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+        lines.append("Most common: " + ", ".join(f"{name} ({n})" for name, n in top) + ".")
     if ctx.get("note"):
         lines.insert(0, ctx["note"])
-    if total:
-        lines.append("Pull requests show annotations only on changed lines; this report lists them all.")
     if overdue:
         lines.append(f"{overdue} finding(s) are past their policy fix-by date.")
     if unmapped:
@@ -660,14 +705,18 @@ def build_report(ctx, build, annotations, is_branch, link):
     if omitted:
         lines.append(f"{omitted} finding(s) not shown: Bitbucket allows {MAX_ANNOTATIONS} per report.")
 
-    data = [("Policy violations", "NUMBER", total)]
+    # (title, TYPE, value, priority): platforms keep the lowest priorities up to their limit.
+    data = [("Policy violations", "NUMBER", total, 1)]
     if is_branch:
-        data.append(("New in this branch", "NUMBER", new))
-    data += [("Scan", "TEXT", build["version"]), ("Veracode results", "LINK", link)]
-    if unmapped:
-        data.append(("Not matched to a file", "NUMBER", unmapped))
-    if omitted:
-        data.append(("Not shown (limit)", "NUMBER", omitted))
+        data.append(("New in this branch", "NUMBER", new, 1))
+    if total:
+        data += [(name, "NUMBER", n, 2 if name in ("Very High", "High") else 3) for name, n in counts.items()]
+    if overdue:
+        data.append(("Past fix-by date", "NUMBER", overdue, 2))
+    data.append(("Scan", "TEXT", build["version"], 0))           # read back by --sync: always kept
+    if build.get("published"):
+        data.append(("Scanned", "DATE", build["published"] * 1000, 4))
+    data.append(("Veracode results", "LINK", link, 0))
     return {"title": title[:MAX_TITLE], "details": " ".join(lines)[:MAX_TEXT], "failed": failed,
             "data": data, "link": link}
 
@@ -679,6 +728,7 @@ class Bitbucket:
     """Shared Code Insights client; subclasses define URLs and payload shapes."""
     LINK_TEXT_KEY = "text"
     RESULT = ("PASSED", "FAILED")
+    MAX_DATA = 6            # report data fields (Data Center limit; Cloud allows 10)
     single_url = None       # URL to upload one annotation; None = bulk requests only
     proxy_commit = ""       # Pipelines proxy: the commit this pipeline runs on
 
@@ -770,15 +820,18 @@ class Bitbucket:
 
     @classmethod
     def report_body(cls, report):
+        items = report["data"]
+        keep = sorted(sorted(range(len(items)), key=lambda i: (items[i][3:] or (9,))[0])[:cls.MAX_DATA])
         data = [{"title": title, "type": kind,
                  "value": {cls.LINK_TEXT_KEY: "Open in Veracode", "href": value} if kind == "LINK" else value}
-                for title, kind, value in report["data"]]
+                for title, kind, value, *_ in (items[i] for i in keep)]
         return {"title": report["title"], "details": report["details"], "reporter": REPORTER,
                 "link": report["link"], "result": cls.RESULT[report["failed"]], "data": data}
 
 
 class BitbucketCloud(Bitbucket):
     API = "https://api.bitbucket.org/2.0"
+    MAX_DATA = 10
 
     def __init__(self, owner, slug, env=None):
         env = os.environ if env is None else env
