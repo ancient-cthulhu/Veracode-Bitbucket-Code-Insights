@@ -4,17 +4,19 @@ Setup is in [SETUP.md](SETUP.md). Back to the [README](../README.md).
 
 ## Where to find it
 
-- **PR diff:** an annotation on each changed line with a finding.
-- **PR reports:** **Veracode SAST (sandbox _branch_)** with PASSED/FAILED and every finding, including lines you didn't change. Cloud: **Reports** in the left sidebar or the card on the right.
-- **Commit page:** the same report.
+- **Pull request:** the **Reports** card on the right (or **Reports** in the left sidebar) opens **Veracode SAST (sandbox _branch_)** with every finding; the diff shows an annotation on each changed line with a finding.
+- **Commit page** (**Commits** > the commit): the same report in the right sidebar. On the default branch this is where the policy scan results are.
+- **Pipeline run** (Pipelines example): the **reports** link at the bottom of the run.
 
 It appears after the scan finishes (scheduled setups: at the next sync, every 20-60 minutes). Each commit has its own report.
 
 ## Reading an annotation
 
 ```text
-NEW | Very High | CWE-89 SQL Injection
-This database query contains a SQL injection flaw... Use a parameterized prepared statement...
+NEW: SQL Injection (CWE-89) in OrderDao.find
+Very High severity. CWE-89: Improper Neutralization of Special Elements used in an SQL Command.
+This database query contains a SQL injection flaw...
+How to fix: Use parameterized prepared statements...
 Function: com.acme.OrderDao.find
 Fix by 2026-12-01 (policy grace period)
 Mitigation proposed in Veracode, waiting for approval.
