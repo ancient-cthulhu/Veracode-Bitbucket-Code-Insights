@@ -441,12 +441,28 @@ class Veracode:
             out.append(f)
         return out
 
-    def policy_issue_ids(self, app_guid, min_severity=0):
+    def sca_findings(self, app_guid, sandbox_guid=None):
+        """Open SCA (third-party library) findings that violate policy, without approved
+        mitigations. The API can't filter SCA findings by policy, so it is done here."""
+        params = {"scan_type": "SCA", "include_exp_date": "TRUE", "size": FINDINGS_PAGE_SIZE}
+        if sandbox_guid:
+            params["context"] = sandbox_guid
+        out = []
+        for f in self._pages(f"/appsec/v2/applications/{app_guid}/findings", params, "findings", "Findings API (SCA)"):
+            status = f.get("finding_status", {})
+            if not f.get("violates_policy") or status.get("status", "").upper() == "CLOSED":
+                continue
+            if status.get("resolution_status", "").upper() == "APPROVED":
+                continue
+            out.append(f)
+        return out
+
+    def policy_issue_ids(self, app_guid, min_severity=0, scan_type="STATIC"):
         """Issue IDs of every static finding in the policy scan, any status. A sandbox
         finding is NEW only when the policy scan never had it (fixed or mitigated
         findings on the default branch are not new to the branch). An issue keeps its
         severity, so only severities the sandbox findings have are fetched."""
-        params = {"scan_type": "STATIC", "size": FINDINGS_PAGE_SIZE}
+        params = {"scan_type": scan_type, "size": FINDINGS_PAGE_SIZE}
         if min_severity:
             params["severity_gte"] = min_severity
         return {f.get("issue_id") for f in
@@ -509,9 +525,10 @@ class RepoFiles:
 
     def __init__(self, repo_dir, commit=None):
         """Files of `commit` when the checkout has it (sync), else of the checkout."""
-        listing = None
+        listing, self.commit = None, None
         if commit and git(["cat-file", "-t", commit], repo_dir) == "commit":
             listing = git(["ls-tree", "-r", "-z", "--name-only", commit], repo_dir, timeout=300)
+            self.commit = commit if listing is not None else None
         if listing is None:
             listing = git(["ls-files", "-z"], repo_dir, timeout=300)
         if listing is None:
@@ -519,9 +536,21 @@ class RepoFiles:
             files = self._walk(repo_dir)
         else:
             files = [f for f in listing.split("\0") if f]
+        self.repo_dir = repo_dir
+        self.paths = files
         self.by_name = {}
         for path in files:
             self.by_name.setdefault(path.rsplit("/", 1)[-1].lower(), []).append(path)
+
+    def read(self, path):
+        """Text of a repository file (at the commit when known), or None."""
+        if self.commit:
+            return git(["show", f"{self.commit}:{path}"], self.repo_dir, timeout=60)
+        try:
+            with open(os.path.join(self.repo_dir, path), encoding="utf-8", errors="replace") as fh:
+                return fh.read(2_000_000)
+        except OSError:
+            return None
 
     @staticmethod
     def _walk(repo_dir):
@@ -680,9 +709,209 @@ def build_results(findings, policy_ids, files, link):
     """policy_ids is None on the default branch, else the issue IDs in the policy scan."""
     annotations = [to_annotation(f, files, policy_ids is not None and f.get("issue_id") not in policy_ids, link)
                    for f in findings]
-    annotations.sort(key=lambda a: (not a["new"], -a["severity"], -a.get("exploit", 0), a["path"] is None,
-                                    a["path"] or "", a["line"] or 0))
-    return annotations
+    return sort_annotations(annotations)
+
+
+def sort_annotations(annotations):
+    """NEW first, then severity, exploitability and location."""
+    return sorted(annotations, key=lambda a: (not a["new"], -a["severity"], -a.get("exploit", 0),
+                                              a["path"] is None, a["path"] or "", a["line"] or 0))
+
+
+
+# -----------------------------------------------------------------------------
+# SCA: vulnerable third-party libraries, traced back to the manifest that adds them
+# -----------------------------------------------------------------------------
+# Dependency files, by language (Veracode "language" values); lock files are searched
+# after the manifests a developer edits.
+SCA_MANIFESTS = {
+    "JAVA": ("pom.xml", "build.gradle", "build.gradle.kts", "build.sbt", "gradle.lockfile"),
+    "JAVASCRIPT": ("package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bower.json"),
+    "PYTHON": ("requirements.txt", "pyproject.toml", "pipfile", "setup.py", "setup.cfg", "pipfile.lock",
+               "poetry.lock"),
+    "GO": ("go.mod", "go.sum"),
+    "PHP": ("composer.json", "composer.lock"),
+    "RUBY": ("gemfile", "gemfile.lock", "*.gemspec"),
+    "DOTNET": ("*.csproj", "*.vbproj", "*.fsproj", "packages.config", "directory.packages.props",
+               "packages.lock.json"),
+    "OBJECTIVE-C": ("podfile", "podfile.lock", "cartfile", "cartfile.resolved"),
+    "SWIFT": ("package.swift", "package.resolved", "podfile", "podfile.lock"),
+    "RUST": ("cargo.toml", "cargo.lock"),
+}
+SCA_LANGUAGE_ALIASES = {"C#": "DOTNET", ".NET": "DOTNET", "CSHARP": "DOTNET", "NUGET": "DOTNET",
+                        "KOTLIN": "JAVA", "SCALA": "JAVA", "TYPESCRIPT": "JAVASCRIPT", "NODE": "JAVASCRIPT"}
+SCA_LOCKFILES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "pipfile.lock", "poetry.lock", "go.sum",
+                 "composer.lock", "gemfile.lock", "packages.lock.json", "podfile.lock", "cartfile.resolved",
+                 "package.resolved", "cargo.lock", "gradle.lockfile"}
+# How a developer finds which direct dependency brings a library in.
+SCA_WHY = {"pom.xml": "mvn dependency:tree -Dincludes=:{name}",
+           "build.gradle": "gradle dependencyInsight --dependency {name}",
+           "build.gradle.kts": "gradle dependencyInsight --dependency {name}",
+           "package.json": "npm ls {name}", "requirements.txt": "pipdeptree -r -p {name}",
+           "pyproject.toml": "pipdeptree -r -p {name}", "go.mod": "go mod why -m {name}",
+           "composer.json": "composer why {name}", "*.csproj": "dotnet nuget why {name}"}
+SCA_EXTENSIONS = re.compile(r"\.(jar|war|ear|aar|tgz|tar\.gz|zip|whl|egg|gem|nupkg|dll)$", re.I)
+
+
+def _manifest_kind(path):
+    """The SCA_MANIFESTS entry a repository file matches ('pom.xml', '*.csproj', ...), or ''."""
+    name = path.rsplit("/", 1)[-1].lower()
+    for names in SCA_MANIFESTS.values():
+        for pattern in names:
+            if name == pattern or (pattern.startswith("*") and name.endswith(pattern[1:])):
+                return pattern
+    return ""
+
+
+def component_name(details):
+    """Library name from the component file name: junit-4.13.jar -> junit."""
+    base = SCA_EXTENSIONS.sub("", details.get("component_filename") or "")
+    version = (details.get("version") or "").lower()
+    for sep in ("-", "_", "@", ".", " "):
+        if version and base.lower().endswith(sep + version):
+            return base[:-len(sep + version)]
+    return base
+
+
+class Manifests:
+    """Finds where a library is declared in the repository's dependency files."""
+
+    def __init__(self, files):
+        self.files = files
+        self.by_kind = {}
+        for path in files.paths:
+            kind = _manifest_kind(path)
+            if kind:
+                self.by_kind.setdefault(kind, []).append(path)
+        self._text = {}
+
+    def text(self, path):
+        if path not in self._text:
+            self._text[path] = self.files.read(path) or ""
+        return self._text[path]
+
+    def candidates(self, language, vc_paths):
+        """Dependency files to search: those named in Veracode's component path first,
+        then the language's files (manifests before lock files), then any."""
+        named = []
+        for vc_path in vc_paths:
+            for part in re.split(r"[/\\#]|zip:", vc_path):
+                if part and _manifest_kind(part):
+                    named += sorted(self.files.by_name.get(part.lower(), []))
+        kinds = SCA_MANIFESTS.get(SCA_LANGUAGE_ALIASES.get(language, language)) or \
+            tuple(k for names in SCA_MANIFESTS.values() for k in names)
+        ordered = [p for k in kinds if k not in SCA_LOCKFILES for p in sorted(self.by_kind.get(k, []))]
+        ordered += [p for k in kinds if k in SCA_LOCKFILES for p in sorted(self.by_kind.get(k, []))]
+        seen, out = set(), []
+        for p in named + ordered:
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out
+
+    @staticmethod
+    def find_line(text, name, kind):
+        variants = {name, name.replace("_", "-"), name.replace("-", "_")}
+        alternatives = "|".join(re.escape(v) for v in sorted(variants))
+        if kind == "pom.xml":
+            pattern = rf"<artifactId>\s*(?:{alternatives})\s*</artifactId>"
+        else:
+            pattern = rf"(?<![\w.-])(?:{alternatives})(?![\w-])"
+        match = re.search(pattern, text, re.I)
+        return text.count("\n", 0, match.start()) + 1 if match else None
+
+    def locate(self, name, language, vc_paths):
+        """(path, line, how): how is 'declared', 'locked', 'transitive' or '' (no file)."""
+        candidates = self.candidates(language, vc_paths)
+        if name:
+            for path in candidates:
+                kind = _manifest_kind(path)
+                line = self.find_line(self.text(path), name, kind)
+                if line:
+                    return path, line, "locked" if kind in SCA_LOCKFILES else "declared"
+        primary = next((p for p in candidates if _manifest_kind(p) not in SCA_LOCKFILES), None)
+        return (primary, None, "transitive") if primary else (None, None, "")
+
+
+def to_sca_annotation(finding, manifests, is_new, link, today=None):
+    """Platform-neutral annotation for a vulnerable library (same keys as to_annotation)."""
+    d = finding.get("finding_details") or {}
+    severity = int(d.get("severity", 0) or 0)
+    cve = d.get("cve") or {}
+    exploitability = cve.get("exploitability") or {}
+    name, version = component_name(d), d.get("version") or ""
+    library = f"{name or d.get('component_filename') or 'library'} {version}".strip()
+    vuln = cve.get("name") or "known vulnerability"
+    score = (cve.get("cvss3") or {}).get("score") or cve.get("cvss")
+    vc_paths = [p.get("path", "") for p in d.get("component_path") or [] if isinstance(p, dict)]
+    path, line, how = manifests.locate(name, (d.get("language") or "").upper(), vc_paths)
+    status = finding.get("finding_status") or {}
+    due = fix_by(finding)
+    today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    overdue = bool(due) and due < today
+
+    head = [f"{SEVERITY_NAMES.get(severity, severity)} severity"]
+    if score:
+        head.append(f"CVSS {score}")
+    if exploitability.get("exploit_observed"):
+        head.append("exploit seen in the wild")
+    elif isinstance(exploitability.get("epss_score"), (int, float)):
+        head.append(f"EPSS {exploitability['epss_score'] * 100:.1f}%")
+    if due:
+        head.append(f"OVERDUE (fix by {due})" if overdue else f"fix by {due}")
+    parts = [" · ".join(head), f"Library: {library}"]
+    text = plain_text(finding.get("description", ""), 600)
+    if text:
+        parts.append(f"Problem: {first_sentences(text, 2)}")
+    dep_mode = str((d.get("metadata") or {}).get("sca_dep_mode", "")).upper() if isinstance(d.get("metadata"), dict) else ""
+    if how == "declared":
+        parts.append(f"Where: declared in {path} (line {line})")
+    elif how == "locked":
+        parts.append(f"Where: pinned in {path} (line {line}); "
+                     + ("brought in by another dependency" if dep_mode == "TRANSITIVE" else "check which dependency adds it"))
+    elif how == "transitive":
+        hint = SCA_WHY.get(_manifest_kind(path), "").format(name=name)
+        parts.append(f"Where: not in {path}; another dependency brings it in"
+                     + (f" (find which: {hint})" if hint and name else ""))
+    elif vc_paths:
+        parts.append(f"Where: {vc_paths[0]} in the scanned files")
+    parts.append(f"Fix: update {name or 'the library'} to a version without {vuln}"
+                 + (" (or the dependency that brings it in)" if how in ("transitive", "locked") else "")
+                 + "; Veracode SCA lists the safe versions.")
+    mitigation = MITIGATION_NOTES.get((status.get("resolution_status") or "").upper())
+    if mitigation:
+        parts.append(mitigation)
+    ref = [f"Veracode issue {finding.get('issue_id')}"]
+    found = status.get("first_found_date") or ""
+    if re.match(r"\d{4}-\d{2}-\d{2}", found):
+        ref.append(f"first found {found[:10]}")
+    href = cve.get("href") or ""
+    if href.startswith(("http://", "https://")):
+        ref.append(f"{vuln}: {href.replace('http://', 'https://', 1)}")
+    parts.append(" · ".join(ref))
+    return {
+        "external_id": f"veracode-sca-{finding.get('issue_id')}",
+        "severity": severity,
+        "new": is_new,
+        "overdue": overdue,
+        "path": path,
+        "line": line,
+        "exploit": 2 if exploitability.get("exploit_observed") else 0,
+        "category": "",
+        "library": library,
+        "summary": f"{'NEW: ' if is_new else ''}{library}: {vuln}{f' (CVSS {score})' if score else ''}"[:MAX_TITLE],
+        "details": " ▸ ".join(parts),
+        "link": link,
+    }
+
+
+def build_sca_results(findings, policy_ids, files, link):
+    """Annotations for SCA findings; policy_ids as in build_results."""
+    if not findings:
+        return []
+    manifests = Manifests(files)
+    return [to_sca_annotation(f, manifests, policy_ids is not None and f.get("issue_id") not in policy_ids, link)
+            for f in findings]
 
 
 def build_report(ctx, build, annotations, is_branch, link):
@@ -697,16 +926,18 @@ def build_report(ctx, build, annotations, is_branch, link):
               for name in ("Very High", "High", "Medium")}
     counts["Low"] = total - sum(counts.values())
     by_severity = ", ".join(f"{n} {name}" for name, n in counts.items() if n)
+    libraries = [a for a in annotations if a.get("library")]
+    kinds = "SAST + SCA" if libraries or ctx.get("sca") else "SAST"
 
     if is_branch:
         failed = new > 0
         lines = [f"{new} new finding(s) in this branch violate the Veracode policy"
                  f" ({total} in total, {total - new} already in the policy scan)."]
-        title = f"Veracode SAST (sandbox {ctx.get('sandbox', ctx['branch'])})"
+        title = f"Veracode {kinds} (sandbox {ctx.get('sandbox', ctx['branch'])})"
     else:
         failed = total > 0
         lines = [f"{total} finding(s) violate the Veracode policy."]
-        title = "Veracode SAST (policy scan)"
+        title = f"Veracode {kinds} (policy scan)"
     if by_severity:
         lines.append(f"By severity: {by_severity}.")
     categories = {}
@@ -716,6 +947,13 @@ def build_report(ctx, build, annotations, is_branch, link):
     if categories:
         top = sorted(categories.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
         lines.append("Most common: " + ", ".join(f"{name} ({n})" for name, n in top) + ".")
+    if libraries:
+        per_library = {}
+        for a in libraries:
+            per_library[a["library"]] = per_library.get(a["library"], 0) + 1
+        top = sorted(per_library.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+        lines.append(f"Libraries (SCA): {len(libraries)} finding(s) in {len(per_library)} librar"
+                     f"{'y' if len(per_library) == 1 else 'ies'}: " + ", ".join(f"{n} ({c})" for n, c in top) + ".")
     if ctx.get("note"):
         lines.insert(0, ctx["note"])
     if overdue:
@@ -731,6 +969,8 @@ def build_report(ctx, build, annotations, is_branch, link):
         data.append(("New in this branch", "NUMBER", new, 1))
     if total:
         data += [(name, "NUMBER", n, 2 if name in ("Very High", "High") else 3) for name, n in counts.items()]
+    if libraries:
+        data.append(("Libraries (SCA)", "NUMBER", len(libraries), 2))
     if overdue:
         data.append(("Past fix-by date", "NUMBER", overdue, 2))
     data.append(("Scan", "TEXT", build["version"], 0))           # read back by --sync: always kept
@@ -978,6 +1218,8 @@ def parse_args(argv):
     p.add_argument("--wait", type=int, default=20, help="minutes to wait for scan results, approximate (default 20)")
     p.add_argument("--fail-build", action="store_true",
                    help="exit 2 when the report is FAILED, 3 when the scan has no usable results")
+    p.add_argument("--no-sca", action="store_true",
+                   help="post only Static Analysis findings, not vulnerable libraries (SCA)")
     p.add_argument("--dry-run", action="store_true", help="print the request bodies instead of posting them")
     p.add_argument("--sync", action="store_true",
                    help="scheduled mode: post every finished scan (policy and all sandboxes) whose commit "
@@ -1034,6 +1276,19 @@ def results_link(platform, app, build):
     return f"{platform}/auth/index.jsp#{fragment}" if fragment else platform
 
 
+def sca_annotations(vc, app, sandbox, files, link):
+    """SCA annotations; a failing SCA lookup is logged and skipped (SAST still posts)."""
+    try:
+        findings = vc.sca_findings(app["guid"], sandbox["guid"] if sandbox else None)
+        policy_ids = None
+        if sandbox:
+            policy_ids = vc.policy_issue_ids(app["guid"], scan_type="SCA") if findings else set()
+    except SystemExit as error:
+        log(f"WARNING: SCA findings skipped: {str(error).removeprefix('ERROR: ')}")
+        return []
+    return build_sca_results(findings, policy_ids, files, link)
+
+
 def post_results(vc, bb, args, ctx, app, sandbox, build, files):
     """Build and post (or print) the report for one finished scan. Returns the report."""
     findings = vc.static_findings(app["guid"], sandbox["guid"] if sandbox else None)
@@ -1043,7 +1298,10 @@ def post_results(vc, bb, args, ctx, app, sandbox, build, files):
         policy_ids = vc.policy_issue_ids(app["guid"], lowest) if findings else set()
     link = results_link(vc.platform, app, build)
     annotations = build_results(findings, policy_ids, files, link)
-    report = build_report(ctx, build, annotations, sandbox is not None, link)
+    if not getattr(args, "no_sca", False):
+        annotations = sort_annotations(annotations + sca_annotations(vc, app, sandbox, files, link))
+    report = build_report({**ctx, "sca": not getattr(args, "no_sca", False)}, build, annotations,
+                          sandbox is not None, link)
     log(f"Report: {'FAILED' if report['failed'] else 'PASSED'} - {report['details']}")
     if args.dry_run:
         cls = BitbucketDataCenter if ctx["server_url"] else BitbucketCloud

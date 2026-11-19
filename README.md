@@ -1,6 +1,6 @@
 # Veracode Bitbucket Code Insights
 
-Shows Veracode SAST findings that violate policy **inline in Bitbucket pull requests** and on commits (Code Insights). Bitbucket Cloud or Data Center, from Bitbucket Pipelines or Jenkins. Python 3.10+.
+Shows Veracode SAST and SCA (vulnerable library) findings that violate policy **inline in Bitbucket pull requests** and on commits (Code Insights). Bitbucket Cloud or Data Center, from Bitbucket Pipelines or Jenkins. Python 3.10+.
 
 - **Set it up:** [docs/SETUP.md](docs/SETUP.md)
 - **Use it (developers):** [docs/DEVELOPERS.md](docs/DEVELOPERS.md)
@@ -11,12 +11,19 @@ Clone or import this repository into your organization; CI downloads the script 
 
 ## What developers see
 
-A **Veracode SAST** report (PASSED/FAILED) on the commit and PR, and an annotation on each affected line:
+A **Veracode SAST + SCA** report (PASSED/FAILED) on the commit and PR, and an annotation on each affected line:
 
 > **NEW: SQL Injection (CWE-89) in OrderDao.find**
 > Very High severity · exploit likely · fix by 2026-12-01 ▸ Problem: ... ▸ Fix: ... ▸ Where: OrderDao.find calls java.sql.Statement.executeQuery ▸ Veracode issue 1234 · first found · CWE link (+ link to Veracode)
 
-The report shows counts per severity, the most common finding types, findings past their fix-by date, the scan, its date and a link to Veracode.
+Vulnerable libraries (SCA) are annotated on the line of the dependency file that declares them (`pom.xml`, `package.json`, `requirements.txt`, ...):
+
+> **NEW: junit 4.13: CVE-2020-15250 (CVSS 5.5)**
+> Medium severity · CVSS 5.5 · EPSS 0.1% ▸ Library: junit 4.13 ▸ Problem: ... ▸ Where: declared in pom.xml (line 42) ▸ Fix: update junit to a version without CVE-2020-15250 ... ▸ Veracode issue 77 · first found · CVE link
+
+A library that another dependency brings in is put on the manifest with the command that shows which one (`mvn dependency:tree -Dincludes=:<name>`, `npm ls <name>`, ...), or on its lock file line. No dependency file in the repository: the Veracode path is shown.
+
+The report shows counts per severity, the most common finding types, the vulnerable libraries, findings past their fix-by date, the scan, its date and a link to Veracode.
 
 | Build | Results from | Report FAILED when |
 |---|---|---|
@@ -82,6 +89,7 @@ Also accepted: `VERACODE_API_KEY_ID` / `VERACODE_API_KEY_SECRET`, `~/.veracode/c
 | `--max-age-days` | `14` | `--sync`: ignore scans older than this |
 | `--wait` | `20` | Minutes to wait for the scan |
 | `--fail-build` | off | Exit 2 when FAILED, 3 when the scan has no usable results |
+| `--no-sca` | off | Post only SAST findings |
 | `--dry-run` | off | Print the requests instead of posting |
 | `--app-name`, `--sandbox-name` | see above | Override profile or sandbox |
 | `--commit`, `--branch`, `--repo`, `--server-url` | CI variables | Other CI systems, local runs |
@@ -150,7 +158,7 @@ To post: drop `--dry-run`, set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data C
 ## Limits
 
 - 1000 annotations per report (Data Center: configurable); the rest are counted.
-- SAST only.
+- SCA from Upload and Scan only (agent-based SCA isn't read). Library lines are found by name in the dependency files; a library with a different name there (e.g. a shaded jar) is put on the manifest without a line.
 - Sandboxes of merged branches aren't deleted.
 - Inline mode holds the CI runner; scheduled mode posts up to one schedule interval after the scan finishes.
 - Bitbucket Pipelines schedules are hourly at most in the UI; every 20 minutes needs the API ([SETUP](docs/SETUP.md#2a-bitbucket-pipelines-cloud)).

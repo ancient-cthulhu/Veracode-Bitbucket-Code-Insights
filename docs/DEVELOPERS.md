@@ -4,7 +4,7 @@ Setup is in [SETUP.md](SETUP.md). Back to the [README](../README.md).
 
 ## Where to find it
 
-- **Pull request:** the **Reports** card on the right (or **Reports** in the left sidebar) opens **Veracode SAST (sandbox _branch_)** with every finding; the diff shows an annotation on each changed line with a finding.
+- **Pull request:** the **Reports** card on the right (or **Reports** in the left sidebar) opens **Veracode SAST + SCA (sandbox _branch_)** with every finding; the diff shows an annotation on each changed line with a finding.
 - **Commit page** (**Commits** > the commit): the same report in the right sidebar. On the default branch this is where the policy scan results are.
 - **Pipeline run** (Pipelines example): the **reports** link at the bottom of the run.
 
@@ -29,6 +29,7 @@ Veracode, waiting for approval. ▸ Veracode issue 1234 · first found 2026-09-0
 | fix by | Policy deadline; `OVERDUE` after it |
 | Veracode issue ID | Search it in Veracode **Triage Flaws** (the link opens the scan's results) |
 | Mitigation line | Proposed (waiting for approval) or rejected |
+| Library (SCA) | A vulnerable third-party library. On the line that declares it; if another dependency brings it in, on the manifest with the command that shows which |
 | Veracode location | Shown instead of a line when the file isn't in this repository as-is |
 | Issue ID + link | Find the finding in Veracode |
 
