@@ -30,6 +30,7 @@ Then in the CI file (step 2) set:
    - Pipelines: name it `<workspace>/<repo>` exactly as in the repository URL, or set `VERACODE_APP_NAME`.
    - Jenkins: any name; set `VERACODE_APP_NAME` (the Veracode plugin requires it).
 2. **Policy** on the profile. Its rules decide what is annotated; its grace periods become the **Fix by** dates.
+   SCA findings appear when the account has Veracode SCA and the scan includes it (Upload and Scan); otherwise only SAST is posted. `--no-sca` turns it off.
 3. **API service account** (API user, not a person) with roles **Upload and Scan API** and **Results API**. If it's in teams, add it to every team that owns a scanned profile.
 4. **HMAC credentials** (API ID + key) for it on the **API Credentials** page ([docs](https://docs.veracode.com/r/c_api_credentials3)).
 
@@ -97,8 +98,8 @@ Then in the CI file (step 2) set:
    sandbox 'feature/x': skipped, scan '...' in progress: Scan In Process
    ```
 
-   The link opens the commit with the **Veracode SAST (policy scan)** report.
-2. **Pull request:** push a branch with a change and open a PR. Its reports show **Veracode SAST (sandbox _branch_)**, the diff shows annotations.
+   The link opens the commit with the **Veracode SAST + SCA (policy scan)** report.
+2. **Pull request:** push a branch with a change and open a PR. Its reports show **Veracode SAST + SCA (sandbox _branch_)**, the diff shows annotations.
 3. `Nothing posted: ...` or `ERROR: ...`: see [Troubleshooting](../README.md#troubleshooting).
 
 To post one commit right away: Pipelines **Run pipeline > custom: veracode-report** on it (waits up to 60 minutes).
