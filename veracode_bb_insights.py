@@ -12,10 +12,10 @@ Code Insights report, with inline annotations on the scanned commit.
 Runs as a CI step (Bitbucket Pipelines or Jenkins) after the Veracode scan.
 Works with Bitbucket Cloud (default) and Bitbucket Data Center (set BITBUCKET_URL).
 
-Takes the latest scan of the branch (the sandbox named after it, or the policy scan on
-the default branch) and posts it on the commit it was made from: the scan version starts
-with that commit's SHA, e.g. "<full SHA>-87". Scans not named that way are shown on the
-current commit, with a note.
+Posts the latest scan of the branch (the sandbox named after it, or the policy scan on
+the default branch) on the commit being built. If that scan was made from another commit
+(the scan version starts with the commit SHA, e.g. "<full SHA>-87"), the report says so.
+--sync posts each scan on the commit it was made from.
 
 Errors: configuration and API problems exit 1 with a one-line "ERROR: ..." message.
 Skip means there is nothing to post for this commit (exit 0, or 3 with --fail-build
@@ -121,6 +121,14 @@ def check(response, what):
         raise SystemExit(f"ERROR: {what} failed: HTTP {response.status_code} {body}"
                          + (f" (trace ID {trace})" if trace else ""))
     return response
+
+
+def network_reason(exc):
+    """Short reason for a failed request, e.g. 'HTTP 502 on every attempt (6 tries)'."""
+    match = re.search(r"too many (\d{3}) error responses", str(exc))
+    if match:
+        return f"HTTP {match.group(1)} on every attempt ({RETRIES + 1} tries)"
+    return f"{type(exc).__name__}: {str(exc)[:300]}"
 
 
 def retry_after(response, default):
@@ -672,16 +680,31 @@ class Bitbucket:
     LINK_TEXT_KEY = "text"
     RESULT = ("PASSED", "FAILED")
     single_url = None       # URL to upload one annotation; None = bulk requests only
+    proxy_commit = ""       # Pipelines proxy: the commit this pipeline runs on
 
     def __init__(self, api, owner, slug, proxies=None, *, retry_post=False):
         self.api, self.owner, self.slug, self.proxies = api, owner, slug, proxies
         self.session = http_session(retry_post=retry_post)
 
     def _call(self, method, url, what, *, ok404=False, **kwargs):
-        r = self.session.request(method, url, proxies=self.proxies, timeout=TIMEOUT, **kwargs)
-        if ok404 and r.status_code == 404:
-            return r
-        return check(r, f"Bitbucket {what}")
+        try:
+            r = self.session.request(method, url, proxies=self.proxies, timeout=TIMEOUT, **kwargs)
+            if ok404 and r.status_code == 404:
+                return r
+            return check(r, f"Bitbucket {what}")
+        except requests.RequestException as exc:
+            raise SystemExit(self.explain(url, f"ERROR: Bitbucket {what} failed: {network_reason(exc)}")) from None
+        except SystemExit as exc:
+            raise SystemExit(self.explain(url, str(exc))) from None
+
+    def explain(self, url, message):
+        """Add a hint when the Pipelines proxy is used for a commit other than its own."""
+        match = re.search(r"/commit/([0-9a-f]{40})/", url)
+        if self.proxy_commit and match and match.group(1) != self.proxy_commit and "proxy" not in message[-200:]:
+            message += (f". This pipeline runs on commit {self.proxy_commit[:12]} and the Pipelines proxy may refuse "
+                        f"reports for other commits: add the BITBUCKET_TOKEN repository variable (docs/SETUP.md), "
+                        f"or run the report pipeline on commit {match.group(1)[:12]}")
+        return message
 
     def publish(self, commit, report, annotations):
         """Replace the report on the commit and add its annotations. Returns the commit URL.
@@ -771,6 +794,7 @@ class BitbucketCloud(Bitbucket):
             proxy = env.get("BITBUCKET_PROXY", "http://localhost:29418")
             super().__init__("http://api.bitbucket.org/2.0", owner, slug,
                              proxies={"http": proxy, "https": proxy}, retry_post=True)
+            self.proxy_commit = env.get("BITBUCKET_COMMIT", "").lower()
         else:
             raise SystemExit("ERROR: set BITBUCKET_TOKEN (needed outside Bitbucket Pipelines).")
 
@@ -1029,7 +1053,6 @@ def run(args, env=None):
         is_branch = ctx["pr_build"] or ctx["branch"] != default_branch
         vc = Veracode()
         app, sandbox, build = find_scan(vc, args, ctx, is_branch)
-        target = scan_commit(build, args.repo_dir, ctx["commit"])
     except Skip as why:
         log(f"Nothing posted: {why}")
         if why.blocking and args.fail_build:
@@ -1037,11 +1060,11 @@ def run(args, env=None):
             return 3
         return 0
 
-    if not target:
-        ctx = {**ctx, "note": unnamed_note(build)}
-    elif target != ctx["commit"]:
-        log(f"Veracode: the latest scan is from commit {target[:12]}; posting it there.")
-        ctx = {**ctx, "commit": target}
+    match = SHA_IN_VERSION.match(build["version"])
+    if not (match and ctx["commit"].startswith(match.group(1).lower())):
+        log(f"Veracode: scan '{build['version']}' was not made from this commit; showing it here with a note.")
+        ctx = {**ctx, "note": f"Results of scan '{build['version']}', which was not made from this commit: "
+                              "line numbers may be off where the code changed since."}
     report = post_results(vc, bb, args, ctx, app, sandbox, build, RepoFiles(args.repo_dir, ctx["commit"]))
     return 2 if args.fail_build and report["failed"] else 0
 

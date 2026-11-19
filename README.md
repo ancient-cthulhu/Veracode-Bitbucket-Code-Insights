@@ -34,7 +34,7 @@ Listed: open findings that violate policy, `NEW` first, then by severity. Approv
    | **Scheduled** (default in the examples) | `--sync` every 20-60 min: for the policy scan and every sandbox, posts the latest finished scan if its commit has no report for it yet | Seconds per run |
    | **Inline** | `--wait N` after the scan step: waits for this commit's scan, then posts | Busy until the scan finishes |
 
-3. The report always shows the branch's **latest** scan, on the commit it was made from (the SHA at the start of the scan version), so lines match. A scan whose version doesn't start with a SHA is shown on the current commit with a note.
+3. The report shows the branch's **latest** scan on the commit being built. If that scan came from an earlier commit, the report says so (lines may be off where code changed). `--sync` posts each scan on the commit it was made from.
 
 - **Profile:** `VERACODE_APP_NAME`, else `<workspace or PROJECT>/<repo>`, else `<repo>` (case ignored).
 - **Branch:** pushes and merges to the default branch get the policy scan; pull requests into it get a sandbox named after the source branch. Other branches aren't scanned (examples).
@@ -64,7 +64,7 @@ Jira tracks findings as tickets; this gives feedback on the commit and PR. Use b
 | Name | Where | Needed for |
 |---|---|---|
 | `VERACODE_API_ID`, `VERACODE_API_KEY` | CI secrets | Always. HMAC credentials of an API account with **Results API** (+ **Upload and Scan API** for the scan step) |
-| `BITBUCKET_TOKEN` | Jenkins credentials | Jenkins. Repository read (Cloud repository access token, Data Center HTTP access token). Not needed in Pipelines |
+| `BITBUCKET_TOKEN` | Jenkins credentials / Pipelines secured variable | Repository read (Cloud repository access token, Data Center HTTP access token). Jenkins: required. Pipelines: needed for the sync only; otherwise the proxy is used |
 | `BITBUCKET_URL` | Environment | Data Center only, e.g. `https://bitbucket.example.com` (`http://` works with a warning) |
 | `VERACODE_APP_NAME` | Environment | Profile name when it isn't the repository name |
 | `BITBUCKET_USER` | Environment | Cloud, when `BITBUCKET_TOKEN` is an Atlassian API token: the account email |
@@ -111,7 +111,7 @@ To post: drop `--dry-run`, set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data C
 
 | What you see | Why | Fix |
 |---|---|---|
-| `the latest scan is from commit ...; posting it there` | The branch's latest scan was made from another commit | Expected: the report goes on that commit |
+| `scan '...' was not made from this commit; showing it here with a note` | The latest scan came from an earlier commit | Expected |
 | Report says `Scan '...' doesn't start with a commit SHA` | Scan uploaded with another version name | Use the example scan step, so lines match the commit |
 | `--sync`: `skipped, ... in progress` / `already posted` / `older than 14 days` | Nothing new to post | Expected |
 | `--sync`: `skipped, commit not found in Bitbucket` | Branch deleted or rewritten | Expected |
@@ -127,6 +127,7 @@ To post: drop `--dry-run`, set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data C
 | `ERROR: Veracode credentials not found` / `unknown region prefix` | Missing or mistyped API ID | Set `VERACODE_API_ID`, `VERACODE_API_KEY` |
 | HTTP 401 from Veracode | Expired, OAuth instead of HMAC, or wrong region | New HMAC credentials; `VERACODE_API_BASE` for region |
 | `ERROR: set BITBUCKET_TOKEN` | Outside Pipelines without a token | Add the token |
+| `... failed: HTTP 502 on every attempt ... the Pipelines proxy may refuse reports for other commits` | The sync posts on scanned commits, which the proxy may refuse | Add the `BITBUCKET_TOKEN` secured variable |
 | `ERROR: could not read the default branch` | Token can't read the repository, or the proxy refused | Pass `--default-branch` |
 | `ERROR: repository ... not found on ...` | Wrong Data Center project/slug, or no access | Check `GIT_URL` / `--repo`; personal repos use `~user` |
 | Jenkins fork PR report on the fork / `not found` | Fork's `GIT_URL` | Set `VBI_REPO` in the Jenkinsfile |
