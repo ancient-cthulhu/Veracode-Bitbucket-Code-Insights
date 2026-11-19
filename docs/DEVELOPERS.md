@@ -14,14 +14,10 @@ It appears after the scan finishes (scheduled setups: at the next sync, every 20
 
 ```text
 NEW: SQL Injection (CWE-89) in OrderDao.find
-Very High severity, exploit likely. CWE-89: Improper Neutralization of Special Elements used in an SQL Command.
-This database query contains a SQL injection flaw...
-How to fix: Use parameterized prepared statements...
-Function: com.acme.OrderDao.find
-Vulnerable call: java.sql.Statement.executeQuery
-First found 2026-09-02. Fix by 2026-12-01 (policy grace period)
-Mitigation proposed in Veracode, waiting for approval.
-Veracode issue ID: 1234. CWE: https://cwe.mitre.org/data/definitions/89.html
+Very High severity · exploit likely · fix by 2026-12-01 ▸ Problem: This database query contains a SQL injection
+flaw. The first argument to executeQuery() contains tainted data from the variable sql... ▸ Fix: Use parameterized
+prepared statements... ▸ Where: OrderDao.find calls java.sql.Statement.executeQuery ▸ Mitigation proposed in
+Veracode, waiting for approval. ▸ Veracode issue 1234 · first found 2026-09-02 · CWE-89: https://cwe.mitre.org/...
 ```
 
 | Part | Meaning |
@@ -29,8 +25,8 @@ Veracode issue ID: 1234. CWE: https://cwe.mitre.org/data/definitions/89.html
 | `NEW` | Your branch adds it (not in the default branch). Fix these first |
 | No `NEW` | Already on the default branch |
 | Exploit | Veracode's estimate of how likely an attacker can use it |
-| Vulnerable call | The call that receives the unsafe data |
-| Fix by | Policy deadline; `overdue` after it |
+| Where | The function, and the call that receives the unsafe data |
+| fix by | Policy deadline; `OVERDUE` after it |
 | Veracode issue ID | Search it in Veracode **Triage Flaws** (the link opens the scan's results) |
 | Mitigation line | Proposed (waiting for approval) or rejected |
 | Veracode location | Shown instead of a line when the file isn't in this repository as-is |
