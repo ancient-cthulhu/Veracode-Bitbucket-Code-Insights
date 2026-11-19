@@ -715,7 +715,8 @@ def build_report(ctx, build, annotations, is_branch, link):
         data.append(("Past fix-by date", "NUMBER", overdue, 2))
     data.append(("Scan", "TEXT", build["version"], 0))           # read back by --sync: always kept
     if build.get("published"):
-        data.append(("Scanned", "DATE", build["published"] * 1000, 4))
+        scanned = datetime.fromtimestamp(build["published"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        data.append(("Scanned", "TEXT", scanned, 4))   # TEXT: Cloud and Data Center disagree on DATE units
     data.append(("Veracode results", "LINK", link, 0))
     return {"title": title[:MAX_TITLE], "details": " ".join(lines)[:MAX_TEXT], "failed": failed,
             "data": data, "link": link}
