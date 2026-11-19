@@ -12,10 +12,10 @@ Code Insights report, with inline annotations on the scanned commit.
 Runs as a CI step (Bitbucket Pipelines or Jenkins) after the Veracode scan.
 Works with Bitbucket Cloud (default) and Bitbucket Data Center (set BITBUCKET_URL).
 
-Takes the latest scan of the branch (the sandbox named after it, or the policy scan on
-the default branch) and posts it on the commit it was made from: the scan version starts
-with that commit's SHA, e.g. "<full SHA>-87". Scans not named that way are shown on the
-current commit, with a note.
+Posts the latest scan of the branch (the sandbox named after it, or the policy scan on
+the default branch) on the commit being built. If that scan was made from another commit
+(the scan version starts with the commit SHA, e.g. "<full SHA>-87"), the report says so.
+--sync posts each scan on the commit it was made from.
 
 Errors: configuration and API problems exit 1 with a one-line "ERROR: ..." message.
 Skip means there is nothing to post for this commit (exit 0, or 3 with --fail-build
@@ -1053,7 +1053,6 @@ def run(args, env=None):
         is_branch = ctx["pr_build"] or ctx["branch"] != default_branch
         vc = Veracode()
         app, sandbox, build = find_scan(vc, args, ctx, is_branch)
-        target = scan_commit(build, args.repo_dir, ctx["commit"])
     except Skip as why:
         log(f"Nothing posted: {why}")
         if why.blocking and args.fail_build:
@@ -1061,11 +1060,11 @@ def run(args, env=None):
             return 3
         return 0
 
-    if not target:
-        ctx = {**ctx, "note": unnamed_note(build)}
-    elif target != ctx["commit"]:
-        log(f"Veracode: the latest scan is from commit {target[:12]}; posting it there.")
-        ctx = {**ctx, "commit": target}
+    match = SHA_IN_VERSION.match(build["version"])
+    if not (match and ctx["commit"].startswith(match.group(1).lower())):
+        log(f"Veracode: scan '{build['version']}' was not made from this commit; showing it here with a note.")
+        ctx = {**ctx, "note": f"Results of scan '{build['version']}', which was not made from this commit: "
+                              "line numbers may be off where the code changed since."}
     report = post_results(vc, bb, args, ctx, app, sandbox, build, RepoFiles(args.repo_dir, ctx["commit"]))
     return 2 if args.fail_build and report["failed"] else 0
 
