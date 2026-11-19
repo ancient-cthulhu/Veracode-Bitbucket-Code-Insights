@@ -14,20 +14,24 @@ It appears after the scan finishes (scheduled setups: at the next sync, every 20
 
 ```text
 NEW: SQL Injection (CWE-89) in OrderDao.find
-Very High severity. CWE-89: Improper Neutralization of Special Elements used in an SQL Command.
+Very High severity, exploit likely. CWE-89: Improper Neutralization of Special Elements used in an SQL Command.
 This database query contains a SQL injection flaw...
 How to fix: Use parameterized prepared statements...
 Function: com.acme.OrderDao.find
-Fix by 2026-12-01 (policy grace period)
+Vulnerable call: java.sql.Statement.executeQuery
+First found 2026-09-02. Fix by 2026-12-01 (policy grace period)
 Mitigation proposed in Veracode, waiting for approval.
-Veracode issue ID: 1234
+Veracode issue ID: 1234. CWE: https://cwe.mitre.org/data/definitions/89.html
 ```
 
 | Part | Meaning |
 |---|---|
 | `NEW` | Your branch adds it (not in the default branch). Fix these first |
 | No `NEW` | Already on the default branch |
+| Exploit | Veracode's estimate of how likely an attacker can use it |
+| Vulnerable call | The call that receives the unsafe data |
 | Fix by | Policy deadline; `overdue` after it |
+| Veracode issue ID | Search it in Veracode **Triage Flaws** (the link opens the scan's results) |
 | Mitigation line | Proposed (waiting for approval) or rejected |
 | Veracode location | Shown instead of a line when the file isn't in this repository as-is |
 | Issue ID + link | Find the finding in Veracode |

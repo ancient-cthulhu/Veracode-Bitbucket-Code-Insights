@@ -14,11 +14,11 @@ Clone or import this repository into your organization; CI downloads the script 
 A **Veracode SAST** report (PASSED/FAILED) on the commit and PR, and an annotation on each affected line:
 
 > **NEW: SQL Injection (CWE-89) in OrderDao.find**
-> Very High severity. This database query contains a SQL injection flaw...
+> Very High severity, exploit likely. This database query contains a SQL injection flaw...
 > How to fix: Use parameterized prepared statements...
-> Function · Fix by 2026-12-01 (policy grace period) · Veracode issue ID: 1234 · link to Veracode
+> Function · vulnerable call · first found / fix-by dates · Veracode issue ID · CWE link · link to Veracode
 
-The report shows counts per severity, findings past their fix-by date, the scan, its date and a link to Veracode.
+The report shows counts per severity, the most common finding types, findings past their fix-by date, the scan, its date and a link to Veracode.
 
 | Build | Results from | Report FAILED when |
 |---|---|---|

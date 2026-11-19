@@ -63,6 +63,7 @@ SCAN_FAILED_WORDS = ("failed", "error", "cancel", "no modules")
 # getbuildinfo.do <error> texts that only mean "no scan yet" (wording: verify)
 NO_BUILD_ERROR = re.compile(r"\b(no|not find|cannot find|could not find|does not have any)\b.*\bbuilds?\b", re.I)
 
+EXPLOITABILITY = {"-2": "very unlikely", "-1": "unlikely", "0": "neutral", "1": "likely", "2": "very likely"}
 SEVERITY_NAMES = {5: "Very High", 4: "High", 3: "Medium", 2: "Low", 1: "Very Low", 0: "Info"}
 CLOUD_SEVERITY = {5: "CRITICAL", 4: "HIGH", 3: "MEDIUM"}   # anything lower -> LOW
 DC_SEVERITY = {5: "HIGH", 4: "HIGH", 3: "MEDIUM"}          # Data Center has no CRITICAL
@@ -606,25 +607,40 @@ def to_annotation(finding, files, is_new, link, today=None):
     procedure = d.get("procedure") or ""
     function = ".".join(procedure.split(".")[-2:])
     summary = f"{'NEW: ' if is_new else ''}{category} (CWE-{cwe.get('id', '?')}){' in ' + function if function else ''}"
+    status = finding.get("finding_status") or {}
+    exploit = EXPLOITABILITY.get(str(d.get("exploitability", "")), "")
     issue, fix = description_parts(finding.get("description", ""))
-    details = [f"{SEVERITY_NAMES.get(severity, severity)} severity. CWE-{cwe.get('id', '?')}"
-               f"{': ' + cwe['name'] if cwe.get('name') else ''}.", issue]
+    rating = f"{SEVERITY_NAMES.get(severity, severity)} severity" + (f", exploit {exploit}" if exploit else "")
+    details = [f"{rating}. CWE-{cwe.get('id', '?')}{': ' + cwe['name'] if cwe.get('name') else ''}.", issue]
     if fix:
         details.append(f"How to fix: {fix}")
     if procedure:
         details.append(f"Function: {procedure}")
+    sink = d.get("attack_vector") or ""
+    if sink and sink != procedure:
+        details.append(f"Vulnerable call: {sink}")
     if path is None:
         where = "/".join(x for x in (d.get("module"), vc_path) if x)
         details.append(f"Veracode location: {where}{f':{line}' if line else ''}")
     due = fix_by(finding)
     today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     overdue = bool(due) and due < today
+    dates = []
+    found = status.get("first_found_date") or ""
+    if re.match(r"\d{4}-\d{2}-\d{2}", found):
+        dates.append(f"{'Reopened, first' if str(status.get('status', '')).upper() == 'REOPENED' else 'First'} "
+                     f"found {found[:10]}")
     if due:
-        details.append(f"Fix by {due} (policy grace period){', overdue' if overdue else ''}")
-    mitigation = MITIGATION_NOTES.get(((finding.get("finding_status") or {}).get("resolution_status") or "").upper())
+        dates.append(f"Fix by {due} (policy grace period){', overdue' if overdue else ''}")
+    if dates:
+        details.append(". ".join(dates))
+    mitigation = MITIGATION_NOTES.get((status.get("resolution_status") or "").upper())
     if mitigation:
         details.append(mitigation)
-    details.append(f"Veracode issue ID: {finding.get('issue_id')}")
+    ref = f"Veracode issue ID: {finding.get('issue_id')}"
+    if str(cwe.get("id", "")).isdigit():
+        ref += f". CWE: https://cwe.mitre.org/data/definitions/{cwe['id']}.html"
+    details.append(ref)
     return {
         "external_id": f"veracode-{finding.get('issue_id')}",
         "severity": severity,
@@ -632,6 +648,8 @@ def to_annotation(finding, files, is_new, link, today=None):
         "overdue": overdue,
         "path": path,
         "line": line if path else None,
+        "exploit": int(d.get("exploitability") or 0) if str(d.get("exploitability", "")).lstrip("-").isdigit() else 0,
+        "category": category,
         "summary": summary[:MAX_TITLE],
         "details": "\n".join(x for x in details if x),
         "link": link,
@@ -642,7 +660,8 @@ def build_results(findings, policy_ids, files, link):
     """policy_ids is None on the default branch, else the issue IDs in the policy scan."""
     annotations = [to_annotation(f, files, policy_ids is not None and f.get("issue_id") not in policy_ids, link)
                    for f in findings]
-    annotations.sort(key=lambda a: (not a["new"], -a["severity"], a["path"] is None, a["path"] or "", a["line"] or 0))
+    annotations.sort(key=lambda a: (not a["new"], -a["severity"], -a.get("exploit", 0), a["path"] is None,
+                                    a["path"] or "", a["line"] or 0))
     return annotations
 
 
@@ -670,6 +689,13 @@ def build_report(ctx, build, annotations, is_branch, link):
         title = "Veracode SAST (policy scan)"
     if by_severity:
         lines.append(f"By severity: {by_severity}.")
+    categories = {}
+    for a in annotations:
+        if a.get("category"):
+            categories[a["category"]] = categories.get(a["category"], 0) + 1
+    if categories:
+        top = sorted(categories.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+        lines.append("Most common: " + ", ".join(f"{name} ({n})" for name, n in top) + ".")
     if ctx.get("note"):
         lines.insert(0, ctx["note"])
     if overdue:
