@@ -123,6 +123,14 @@ def check(response, what):
     return response
 
 
+def network_reason(exc):
+    """Short reason for a failed request, e.g. 'HTTP 502 on every attempt (6 tries)'."""
+    match = re.search(r"too many (\d{3}) error responses", str(exc))
+    if match:
+        return f"HTTP {match.group(1)} on every attempt ({RETRIES + 1} tries)"
+    return f"{type(exc).__name__}: {str(exc)[:300]}"
+
+
 def retry_after(response, default):
     value = response.headers.get("Retry-After", "")
     return min(int(value), 120) if value.isascii() and value.isdigit() and len(value) <= 6 else default
@@ -672,16 +680,31 @@ class Bitbucket:
     LINK_TEXT_KEY = "text"
     RESULT = ("PASSED", "FAILED")
     single_url = None       # URL to upload one annotation; None = bulk requests only
+    proxy_commit = ""       # Pipelines proxy: the commit this pipeline runs on
 
     def __init__(self, api, owner, slug, proxies=None, *, retry_post=False):
         self.api, self.owner, self.slug, self.proxies = api, owner, slug, proxies
         self.session = http_session(retry_post=retry_post)
 
     def _call(self, method, url, what, *, ok404=False, **kwargs):
-        r = self.session.request(method, url, proxies=self.proxies, timeout=TIMEOUT, **kwargs)
-        if ok404 and r.status_code == 404:
-            return r
-        return check(r, f"Bitbucket {what}")
+        try:
+            r = self.session.request(method, url, proxies=self.proxies, timeout=TIMEOUT, **kwargs)
+            if ok404 and r.status_code == 404:
+                return r
+            return check(r, f"Bitbucket {what}")
+        except requests.RequestException as exc:
+            raise SystemExit(self.explain(url, f"ERROR: Bitbucket {what} failed: {network_reason(exc)}")) from None
+        except SystemExit as exc:
+            raise SystemExit(self.explain(url, str(exc))) from None
+
+    def explain(self, url, message):
+        """Add a hint when the Pipelines proxy is used for a commit other than its own."""
+        match = re.search(r"/commit/([0-9a-f]{40})/", url)
+        if self.proxy_commit and match and match.group(1) != self.proxy_commit and "proxy" not in message[-200:]:
+            message += (f". This pipeline runs on commit {self.proxy_commit[:12]} and the Pipelines proxy may refuse "
+                        f"reports for other commits: add the BITBUCKET_TOKEN repository variable (docs/SETUP.md), "
+                        f"or run the report pipeline on commit {match.group(1)[:12]}")
+        return message
 
     def publish(self, commit, report, annotations):
         """Replace the report on the commit and add its annotations. Returns the commit URL.
@@ -771,6 +794,7 @@ class BitbucketCloud(Bitbucket):
             proxy = env.get("BITBUCKET_PROXY", "http://localhost:29418")
             super().__init__("http://api.bitbucket.org/2.0", owner, slug,
                              proxies={"http": proxy, "https": proxy}, retry_post=True)
+            self.proxy_commit = env.get("BITBUCKET_COMMIT", "").lower()
         else:
             raise SystemExit("ERROR: set BITBUCKET_TOKEN (needed outside Bitbucket Pipelines).")
 

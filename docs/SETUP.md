@@ -42,7 +42,8 @@ Then in the CI file (step 2) set:
 2. Adapt the **Package for Veracode** step to your language (it uses a Maven/Java 17 image), or replace it with your build writing the files to scan into `verascan/` ([packaging guide](https://docs.veracode.com/r/compilation_packaging)).
 3. Default branch isn't `main`? Change `main` in the two `triggers` at the end of the file and add the repository variable `DEFAULT_BRANCH` (step 5).
 4. **Repository settings > Pipelines > Settings**: enable Pipelines.
-5. **Repository settings > Pipelines > Repository variables**: add `VERACODE_API_ID` and `VERACODE_API_KEY` (both **Secured**), and `VERACODE_APP_NAME` / `DEFAULT_BRANCH` if needed. No Bitbucket token is needed.
+5. **Repository settings > Pipelines > Repository variables**: add `VERACODE_API_ID` and `VERACODE_API_KEY` (both **Secured**), and `VERACODE_APP_NAME` / `DEFAULT_BRANCH` if needed.
+   For the scheduled sync also add `BITBUCKET_TOKEN` (**Secured**): **Repository settings > Access tokens > Create**, scope **Repositories: Read**. The sync posts on the commits that were scanned, and the Pipelines proxy may refuse commits other than the pipeline's own. Inline mode works without it.
 6. Set `VBI_URL` in `bitbucket-pipelines.yml` (step 0).
 7. Push to the default branch.
 8. Schedule the sync on the default branch:

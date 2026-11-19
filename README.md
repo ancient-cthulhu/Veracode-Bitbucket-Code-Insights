@@ -64,7 +64,7 @@ Jira tracks findings as tickets; this gives feedback on the commit and PR. Use b
 | Name | Where | Needed for |
 |---|---|---|
 | `VERACODE_API_ID`, `VERACODE_API_KEY` | CI secrets | Always. HMAC credentials of an API account with **Results API** (+ **Upload and Scan API** for the scan step) |
-| `BITBUCKET_TOKEN` | Jenkins credentials | Jenkins. Repository read (Cloud repository access token, Data Center HTTP access token). Not needed in Pipelines |
+| `BITBUCKET_TOKEN` | Jenkins credentials / Pipelines secured variable | Repository read (Cloud repository access token, Data Center HTTP access token). Jenkins: required. Pipelines: needed for the sync and for reports on another commit than the pipeline's; otherwise the proxy is used |
 | `BITBUCKET_URL` | Environment | Data Center only, e.g. `https://bitbucket.example.com` (`http://` works with a warning) |
 | `VERACODE_APP_NAME` | Environment | Profile name when it isn't the repository name |
 | `BITBUCKET_USER` | Environment | Cloud, when `BITBUCKET_TOKEN` is an Atlassian API token: the account email |
@@ -127,6 +127,7 @@ To post: drop `--dry-run`, set `BITBUCKET_TOKEN` (and `BITBUCKET_URL` for Data C
 | `ERROR: Veracode credentials not found` / `unknown region prefix` | Missing or mistyped API ID | Set `VERACODE_API_ID`, `VERACODE_API_KEY` |
 | HTTP 401 from Veracode | Expired, OAuth instead of HMAC, or wrong region | New HMAC credentials; `VERACODE_API_BASE` for region |
 | `ERROR: set BITBUCKET_TOKEN` | Outside Pipelines without a token | Add the token |
+| `... failed: HTTP 502 on every attempt ... the Pipelines proxy may refuse reports for other commits` | The report goes on the scanned commit, not the one the pipeline runs on | Add the `BITBUCKET_TOKEN` secured variable, or run the report pipeline on the scanned commit |
 | `ERROR: could not read the default branch` | Token can't read the repository, or the proxy refused | Pass `--default-branch` |
 | `ERROR: repository ... not found on ...` | Wrong Data Center project/slug, or no access | Check `GIT_URL` / `--repo`; personal repos use `~user` |
 | Jenkins fork PR report on the fork / `not found` | Fork's `GIT_URL` | Set `VBI_REPO` in the Jenkinsfile |

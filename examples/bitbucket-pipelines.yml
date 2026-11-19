@@ -21,7 +21,10 @@
 #   VERACODE_APP_NAME   Optional. Default: <workspace>/<repo>
 #   DEFAULT_BRANCH      Optional. Branch that gets the policy scan. Default: main
 #
-# No Bitbucket token is needed: the report step uses the Pipelines proxy.
+#   BITBUCKET_TOKEN     Secured. Needed by veracode-sync, and whenever a report goes on another commit
+#                       than the pipeline's: the Pipelines proxy may refuse those. Repository access
+#                       token (Repository settings > Access tokens), scope Repositories: Read.
+#                       Without it, the proxy is used.
 #
 # The Veracode CLI and the API wrapper are pinned to a version and
 # checked against their SHA-256, because secured variables are available to every step.
